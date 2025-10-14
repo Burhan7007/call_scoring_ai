@@ -2,26 +2,30 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>Call Analysis Dashboard</title>
+  <title>Call Scoring Dashboard</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <style>
-    body{background:#0e1522;color:#e7ecf9;font-family:Segoe UI,Roboto,Arial}
-    .topbar{display:flex;justify-content:space-between;align-items:center;padding:14px 22px;background:#101b2d;position:sticky;top:0;z-index:10}
-    h2{margin:0;font-size:20px;display:flex;gap:10px;align-items:center}
-    .btn{background:#1d3557;color:#fff;text-decoration:none;border-radius:8px;padding:8px 14px;border:0;cursor:pointer}
-    .filters{display:flex;gap:10px;flex-wrap:wrap;padding:16px 22px}
-    input,select{background:#0f1a2c;border:1px solid #233250;color:#e8eefc;padding:8px 10px;border-radius:8px;min-width:180px}
-    table{width:100%;border-collapse:collapse;margin:0 22px 30px}
-    th,td{padding:10px;border-bottom:1px solid #22314c;font-size:14px}
-    th{color:#a8bddf;text-align:left}
-    a{color:#99c1ff}
+    body{background:#0e1522;color:#e7ecf9;font-family:Segoe UI,Roboto,Arial;margin:0}
+    .topbar{display:flex;justify-content:space-between;align-items:center;
+            padding:14px 22px;background:#101b2d;position:sticky;top:0;z-index:10}
+    .btn{background:#1d3557;color:#fff;text-decoration:none;border-radius:8px;
+         padding:8px 14px;border:0;cursor:pointer;font-size:14px}
+    a{color:#9ec5ff;text-decoration:none}
+    a:hover{color:#d0e2ff}
   </style>
 </head>
 <body>
+  {% if session.get('admin') %}
   <div class="topbar">
-    <h2>📞 Call Analysis Dashboard</h2>
-    <a href="{{ url_for('export_csv') }}" class="btn">Export CSV</a>
+    <div>📞 <b>Call Scoring Dashboard</b></div>
+    <div style="display:flex;gap:10px;align-items:center;">
+      <a href="{{ url_for('dashboard') }}" class="btn">Dashboard</a>
+      <a href="{{ url_for('export_csv') }}" class="btn">Export CSV</a>
+      <a href="{{ url_for('change_password') }}" class="btn">Change Password</a>
+      <a href="{{ url_for('logout') }}" class="btn" style="background:#b91c1c;">Logout</a>
+    </div>
   </div>
+  {% endif %}
   {% block content %}{% endblock %}
 </body>
 </html>

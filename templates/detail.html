@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 {% block content %}
-<div style="padding:18px 22px">
-  <h3 style="margin:0 0 8px">Call ID: {{ cid }}</h3>
-  <div style="color:#a8bddf;margin-bottom:12px">
+<div style="padding:20px 30px">
+  <h2>📞 Call ID: {{ cid }}</h2>
+  <div style="color:#9bb1d3;margin-bottom:15px;">
     <b>Agent:</b> {{ d.agent_name }} &nbsp;|&nbsp;
     <b>Customer:</b> {{ d.customer_phone }} &nbsp;|&nbsp;
     <b>Language:</b> {{ d.language_detected }} &nbsp;|&nbsp;
@@ -10,17 +10,18 @@
     <b>Status:</b> {{ d.call_status }}
   </div>
 
-  <h4 style="margin:10px 0 6px">Score: {{ d.scoring.total }} / 100</h4>
-  <div style="margin-bottom:10px"><b>Comment:</b> {{ d.scoring.comment }}</div>
-  {% if d.scoring.missing and d.scoring.missing|length>0 %}
-    <div style="margin-bottom:14px"><b>Missing KPIs:</b> {{ d.scoring.missing | join(', ') }}</div>
+  <h4>Score: {{ d.scoring.total }} / 100</h4>
+  <p><b>Comment:</b> {{ d.scoring.comment }}</p>
+
+  {% if d.scoring.missing %}
+    <p><b>Missing KPIs:</b> {{ d.scoring.missing | join(', ') }}</p>
   {% endif %}
 
   <h4>Transcript (English)</h4>
-  <pre style="white-space:pre-wrap;background:#0f1a2c;padding:12px;border-radius:8px">{{ d.translation.english }}</pre>
+  <pre style="background:#0f1a2c;padding:12px;border-radius:8px;white-space:pre-wrap;">{{ d.translation.english }}</pre>
 
   <h4>Transcript (Italian)</h4>
-  <pre style="white-space:pre-wrap;background:#0f1a2c;padding:12px;border-radius:8px">{{ d.translation.italian }}</pre>
+  <pre style="background:#0f1a2c;padding:12px;border-radius:8px;white-space:pre-wrap;">{{ d.translation.italian }}</pre>
 
   <h4>Dialogue</h4>
   <ul>

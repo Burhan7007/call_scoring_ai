@@ -1,42 +1,35 @@
 {% extends "base.html" %}
 {% block content %}
+<div class="filters" style="padding:16px 22px">
+  <form method="get" style="display:flex;gap:10px;flex-wrap:wrap;">
+    <input name="q" value="{{ request.args.get('q','') }}" placeholder="Search transcript (EN)...">
+    <input name="phone" value="{{ request.args.get('phone','') }}" placeholder="Customer phone...">
+    <select name="agent">
+      <option value="">All Agents</option>
+      {% for a in agents %}
+        <option value="{{ a }}" {% if request.args.get('agent','')==a %}selected{% endif %}>{{ a }}</option>
+      {% endfor %}
+    </select>
+    <select name="lang">
+      <option value="">All Languages</option>
+      {% for l in langs %}
+        <option value="{{ l }}" {% if request.args.get('lang','')==l %}selected{% endif %}>{{ l }}</option>
+      {% endfor %}
+    </select>
+    <select name="status">
+      <option value="">All Statuses</option>
+      {% for s in statuses %}
+        <option value="{{ s }}" {% if request.args.get('status','')==s %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+    <button class="btn" type="submit">Filter</button>
+  </form>
+</div>
 
-<form class="filters" method="get">
-  <input name="q" value="{{ q }}" placeholder="Search transcript (EN)..." />
-  <input name="phone" value="{{ phone }}" placeholder="Customer phone..." />
-  <select name="agent">
-    <option value="">All Agents</option>
-    {% for a in agents %}
-      <option value="{{ a }}" {% if agent and agent==a.lower() %}selected{% endif %}>{{ a }}</option>
-    {% endfor %}
-  </select>
-  <select name="lang">
-    <option value="">All Languages</option>
-    {% for l in langs %}
-      <option value="{{ l }}" {% if lang and lang==l.lower() %}selected{% endif %}>{{ l }}</option>
-    {% endfor %}
-  </select>
-  <select name="status">
-    {% for s in statuses %}
-      <option value="{{ s }}" {% if status==s %}selected{% endif %}>{{ s }}</option>
-    {% endfor %}
-    {% if 'answered' not in statuses %}
-      <option value="answered" {% if status=='answered' %}selected{% endif %}>answered</option>
-    {% endif %}
-  </select>
-  <button class="btn" type="submit">Filter</button>
-</form>
-
-<table>
+<table style="width:100%;border-collapse:collapse;margin:0 22px 30px">
   <thead>
     <tr>
-      <th>Agent</th>
-      <th>Customer</th>
-      <th>Language</th>
-      <th>Duration</th>
-      <th>Status</th>
-      <th>Score</th>
-      <th>Actions</th>
+      <th>Agent</th><th>Customer</th><th>Language</th><th>Duration</th><th>Status</th><th>Score</th><th>Actions</th>
     </tr>
   </thead>
   <tbody>
@@ -55,7 +48,7 @@
       </tr>
     {% endfor %}
     {% if items|length == 0 %}
-      <tr><td colspan="7" style="color:#9fb3d9">No results with current filters.</td></tr>
+      <tr><td colspan="7" style="color:#9fb3d9;text-align:center">No results found.</td></tr>
     {% endif %}
   </tbody>
 </table>
