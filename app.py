@@ -346,6 +346,100 @@ def report_pdf(cid):
     return send_file(out, as_attachment=True)
 
 # ==============================
+# VOISO WEBHOOK HANDLER
+# ==============================
+@app.route("/voiso-webhook", methods=["POST"])
+def voiso_webhook():
+    try:
+        data = request.get_json(force=True, silent=True)
+        if not data:
+            return jsonify({"error": "No JSON received"}), 400
+
+        call_data = data.get("data", {})
+        call_id = call_data.get("id") or datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        recording_url = call_data.get("recording")
+
+        logging.info(f"🎧 Webhook received for Call ID: {call_id}")
+
+        # Prepare JSON skeleton
+        call_json = {
+            "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            "call_id": call_id,
+            "agent_name": call_data.get("agent", {}).get("name", "Unknown"),
+            "customer_phone": call_data.get("called_number", "Unknown"),
+            "duration": call_data.get("duration", "N/A"),
+            "call_status": call_data.get("disposition", "Unknown"),
+            "cdr_url": call_data.get("cdr_url"),
+            "recording_url": recording_url,
+            "language_detected": detect_language_from_country(call_data.get("called_number")),
+        }
+
+        # Save immediately (before processing)
+        jf = RECORDINGS_DIR / f"call_{call_id}.json"
+        jf.write_text(json.dumps(call_json, indent=2))
+        logging.info(f"💾 Metadata saved → {jf}")
+
+        # Background processing (transcription + scoring)
+        threading.Thread(target=process_voiso_call, args=(recording_url, jf)).start()
+
+        return jsonify({"status": "received"}), 200
+
+    except Exception as e:
+        logging.error(f"⚠️ Webhook Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+def process_voiso_call(recording_url, jf_path):
+    """Download, transcribe, translate, and score the call."""
+    try:
+        if not recording_url:
+            logging.warning("No recording URL found.")
+            return
+
+        # Download recording
+        audio_path = RECORDINGS_DIR / f"{jf_path.stem}.mp3"
+        with requests.get(recording_url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            with open(audio_path, "wb") as f:
+                for chunk in r.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        logging.info(f"⬇️ Downloaded audio: {audio_path}")
+
+        # Transcribe
+        segments, _ = whisper_model.transcribe(str(audio_path), beam_size=5)
+        dialogue = diarize(segments)
+        full_text = "\n".join([seg["text"] for seg in dialogue])
+
+        # Translate
+        lang = detect_language_from_country(jf_path.stem)
+        english_text = translate_to_english(full_text, lang)
+        italian_text = translate_en_to_it(english_text)
+
+        # Scoring
+        score, missing, comment = score_text(english_text)
+
+        # Update JSON file
+        record = json.loads(jf_path.read_text())
+        record["language_detected"] = lang
+        record["translation"] = {
+            "english": english_text,
+            "italian": italian_text
+        }
+        record["scoring"] = {
+            "total": score,
+            "missing": missing,
+            "comment": comment
+        }
+        record["dialogue"] = dialogue
+
+        jf_path.write_text(json.dumps(record, indent=2))
+        logging.info(f"✅ Processed and saved → {jf_path.name}")
+
+    except Exception as e:
+        logging.error(f"❌ Processing failed: {e}")
+
+
+# ==============================
 # MAIN
 # ==============================
 if __name__ == "__main__":

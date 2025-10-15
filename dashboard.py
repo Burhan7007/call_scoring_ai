@@ -238,6 +238,7 @@ def report_pdf(cid):
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"}), 200
+    
 
 # ==============================
 # MAIN

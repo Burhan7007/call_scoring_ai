@@ -10,9 +10,21 @@
     <h1 class="text-2xl font-bold text-center mb-6">🔐 Admin Login</h1>
 
     <form method="POST" class="space-y-4">
-      <input name="username" placeholder="Username" class="w-full p-3 rounded bg-white/20 border border-white/30 text-white placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-400">
-      <input name="password" type="password" placeholder="Password" class="w-full p-3 rounded bg-white/20 border border-white/30 text-white placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-400">
-      <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 transition text-white font-semibold py-2 rounded">Login</button>
+      <!-- ✅ Fixed: input text is now clearly visible -->
+      <input 
+        name="username" 
+        placeholder="Username" 
+        class="w-full p-3 rounded bg-white/20 border border-white/30 text-gray-100 placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white/30">
+
+      <input 
+        name="password" 
+        type="password" 
+        placeholder="Password" 
+        class="w-full p-3 rounded bg-white/20 border border-white/30 text-gray-100 placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-400 focus:bg-white/30">
+
+      <button type="submit" class="w-full bg-blue-500 hover:bg-blue-600 transition text-white font-semibold py-2 rounded">
+        Login
+      </button>
     </form>
 
     <div class="text-center mt-4 space-x-2 text-sm">
