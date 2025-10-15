@@ -1,4 +1,4 @@
-import os, json, threading
+import os, json, threading, logging
 from pathlib import Path
 from datetime import datetime
 import requests, torch
@@ -15,6 +15,14 @@ from reportlab.pdfgen import canvas
 from werkzeug.security import generate_password_hash, check_password_hash
 
 # ==============================
+# LOGGING
+# ==============================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+
+# ==============================
 # PATHS / ENV
 # ==============================
 ROOT = Path(__file__).resolve().parent
@@ -23,12 +31,16 @@ MODELS_DIR = ROOT / "models"
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+# ==============================
+# WHISPER (accuracy-first)
+# ==============================
 USE_GPU = torch.cuda.is_available()
 DEVICE = "cuda" if USE_GPU else "cpu"
 COMPUTE = "float16" if USE_GPU else "int8"
 
-print(f"🎧 Loading Whisper model (tiny) [{DEVICE}, {COMPUTE}]...")
-whisper_model = WhisperModel("tiny", device=DEVICE, compute_type=COMPUTE)
+# Use the more accurate 'base' model (vs tiny)
+logging.info(f"🎧 Loading Whisper model (base) [{DEVICE}, {COMPUTE}]...")
+whisper_model = WhisperModel("base", device=DEVICE, compute_type=COMPUTE)
 
 # ==============================
 # TRANSLATION MODELS
@@ -46,7 +58,7 @@ EN_TO_IT = "Helsinki-NLP/opus-mt-en-it"
 def _load_translator(name):
     if name in TRANSLATORS:
         return TRANSLATORS[name]
-    print(f"Loading translator: {name}")
+    logging.info(f"🌐 Loading translator: {name}")
     tok = MarianTokenizer.from_pretrained(name, cache_dir=str(HF_CACHE))
     mdl = MarianMTModel.from_pretrained(name, cache_dir=str(HF_CACHE))
     TRANSLATORS[name] = (tok, mdl)
@@ -114,7 +126,7 @@ def score_text(english_text: str):
     return score, missing, comment
 
 # ==============================
-# DIARIZATION
+# DIARIZATION (simple gap-based)
 # ==============================
 def diarize(raw, pause=1.2):
     dialogue, buf, cur, start, last = [], [], "Agent", 0.0, 0.0
@@ -141,7 +153,7 @@ def get_admin_creds():
     if not CREDS_FILE.exists():
         creds = {"username": "admin", "password_hash": generate_password_hash("ChangeMe123!")}
         CREDS_FILE.write_text(json.dumps(creds))
-        print("⚠️ Default admin created: username=admin | password=ChangeMe123!")
+        logging.warning("⚠️ Default admin created: username=admin | password=ChangeMe123!")
     else:
         creds = json.loads(CREDS_FILE.read_text())
     return creds
@@ -149,7 +161,7 @@ def get_admin_creds():
 def save_admin_creds(username, new_pw):
     creds = {"username": username, "password_hash": generate_password_hash(new_pw)}
     CREDS_FILE.write_text(json.dumps(creds))
-    print(f"✅ Password updated for {username}")
+    logging.info(f"✅ Password updated for {username}")
 
 # ==============================
 # NORMALIZER
@@ -165,7 +177,7 @@ def _normalize(d: dict) -> dict:
     return d
 
 # ==============================
-# FLASK APP SETUP
+# FLASK APP
 # ==============================
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "replace_this_secret_key")
@@ -181,7 +193,6 @@ def login_required(f):
 
 @app.route("/")
 def home():
-    # Always start at login page first
     if not session.get("admin"):
         return redirect(url_for("login_page"))
     return redirect(url_for("dashboard"))
@@ -237,7 +248,7 @@ def change_password():
     return render_template("change_password.html")
 
 # ==============================
-# EXPORT CSV (fixed order)
+# EXPORT CSV
 # ==============================
 @app.route("/export/csv")
 @login_required
@@ -249,7 +260,7 @@ def export_csv():
             d = _normalize(d)
             data.append(d)
         except Exception as e:
-            print("⚠️ Skip", f, e)
+            logging.warning(f"Skip {f}: {e}")
     if not data:
         abort(404)
     df = pd.json_normalize(data)
@@ -258,46 +269,18 @@ def export_csv():
     return send_file(out, as_attachment=True)
 
 # ==============================
-# DASHBOARD, DETAIL & REPORT
+# DASHBOARD PAGES (thin wrappers)
 # ==============================
 @app.route("/dashboard")
 @login_required
 def dashboard():
-    q = (request.args.get("q") or "").strip().lower()
-    phone_q = (request.args.get("phone") or "").strip()
-    agent_q = (request.args.get("agent") or "").strip().lower()
-    lang_q = (request.args.get("lang") or "").strip().lower()
-    status_q = (request.args.get("status") or "").strip().lower()
-
-    all_rows, items = [], []
-    for f in RECORDINGS_DIR.glob("call_*.json"):
-        try:
-            d = json.loads(f.read_text(encoding="utf-8"))
-            d = _normalize(d)
-            d["_id"] = f.stem.replace("call_", "")
-            all_rows.append(d)
-        except Exception as e:
-            print("⚠️ Error loading", f, e)
-
-    agents = sorted({r.get("agent_name") for r in all_rows if r.get("agent_name")})
-    langs = sorted({r.get("language_detected") for r in all_rows if r.get("language_detected")})
-    statuses = sorted({r.get("call_status") for r in all_rows if r.get("call_status")})
-
-    for r in all_rows:
-        if status_q and r.get("call_status", "").lower() != status_q:
-            continue
-        if agent_q and agent_q not in (r.get("agent_name") or "").lower():
-            continue
-        if lang_q and lang_q != (r.get("language_detected") or "").lower():
-            continue
-        if phone_q and phone_q not in (r.get("customer_phone") or ""):
-            continue
-        if q and q not in (r.get("translation", {}).get("english", "").lower()):
-            continue
-        items.append(r)
-
-    items = sorted(items, key=lambda x: x.get("timestamp", ""), reverse=True)
-    return render_template("index.html", items=items, agents=agents, langs=langs, statuses=statuses)
+    # Dashboard itself is served by dashboard.py (same process)
+    # We just render template from here too for simplicity.
+    # The template expects items etc.; dashboard.py fills them.
+    # When dashboard.py is used as separate WSGI, this route
+    # won’t be hit. Keeping it for compatibility.
+    from dashboard import dashboard as dash_fn  # lazy import
+    return dash_fn()
 
 @app.route("/call/<cid>")
 @login_required
@@ -346,7 +329,7 @@ def report_pdf(cid):
     return send_file(out, as_attachment=True)
 
 # ==============================
-# VOISO WEBHOOK HANDLER
+# VOISO WEBHOOK
 # ==============================
 @app.route("/voiso-webhook", methods=["POST"])
 def voiso_webhook():
@@ -355,93 +338,96 @@ def voiso_webhook():
         if not data:
             return jsonify({"error": "No JSON received"}), 400
 
-        call_data = data.get("data", {})
-        call_id = call_data.get("id") or datetime.utcnow().strftime("%Y%m%d%H%M%S")
-        recording_url = call_data.get("recording")
+        call = data.get("data", {}) or {}
+        call_id = call.get("id") or datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        recording_url = call.get("recording")
+        called_number = call.get("called_number", "Unknown")
 
-        logging.info(f"🎧 Webhook received for Call ID: {call_id}")
+        logging.info(f"📨 Webhook for Call ID: {call_id}")
 
-        # Prepare JSON skeleton
+        # Detect language as early as possible
+        lang_guess = detect_language_from_country(called_number)
+
+        # Normalize duration (may be dict or seconds)
+        duration = call.get("duration", "N/A")
+        if isinstance(duration, dict):
+            # keep original structure; dashboard will pretty print talk_time
+            pass
+
         call_json = {
             "timestamp": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             "call_id": call_id,
-            "agent_name": call_data.get("agent", {}).get("name", "Unknown"),
-            "customer_phone": call_data.get("called_number", "Unknown"),
-            "duration": call_data.get("duration", "N/A"),
-            "call_status": call_data.get("disposition", "Unknown"),
-            "cdr_url": call_data.get("cdr_url"),
+            "agent_name": (call.get("agent") or {}).get("name", "Unknown"),
+            "customer_phone": called_number,
+            "duration": duration,                       # keep as provided
+            "call_status": call.get("disposition", "Unknown"),
+            "cdr_url": call.get("cdr_url"),
             "recording_url": recording_url,
-            "language_detected": detect_language_from_country(call_data.get("called_number")),
+            "language_detected": lang_guess,
+            "translation": {"english": "", "italian": ""},
+            "scoring": {"total": 0, "missing": [], "comment": ""},
+            "dialogue": []
         }
 
-        # Save immediately (before processing)
         jf = RECORDINGS_DIR / f"call_{call_id}.json"
         jf.write_text(json.dumps(call_json, indent=2))
         logging.info(f"💾 Metadata saved → {jf}")
 
-        # Background processing (transcription + scoring)
-        threading.Thread(target=process_voiso_call, args=(recording_url, jf)).start()
+        # Background processing (audio → transcript → translate → score)
+        threading.Thread(target=process_voiso_call, args=(call_json, jf)).start()
 
         return jsonify({"status": "received"}), 200
 
     except Exception as e:
-        logging.error(f"⚠️ Webhook Error: {e}")
+        logging.exception("Webhook error")
         return jsonify({"error": str(e)}), 500
 
 
-def process_voiso_call(recording_url, jf_path):
+def process_voiso_call(call_json: dict, jf_path: Path):
     """Download, transcribe, translate, and score the call."""
     try:
+        recording_url = call_json.get("recording_url")
         if not recording_url:
-            logging.warning("No recording URL found.")
+            logging.warning("No recording URL in payload.")
             return
 
-        # Download recording
         audio_path = RECORDINGS_DIR / f"{jf_path.stem}.mp3"
-        with requests.get(recording_url, stream=True, timeout=60) as r:
+        logging.info(f"⬇️ Downloading audio: {recording_url}")
+        with requests.get(recording_url, stream=True, timeout=120) as r:
             r.raise_for_status()
             with open(audio_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-        logging.info(f"⬇️ Downloaded audio: {audio_path}")
 
-        # Transcribe
+        logging.info(f"🎙️ Transcribing {audio_path.name} …")
         segments, _ = whisper_model.transcribe(str(audio_path), beam_size=5)
         dialogue = diarize(segments)
-        full_text = "\n".join([seg["text"] for seg in dialogue])
+        # Combine text in chronological order
+        full_text = "\n".join([f"{seg['speaker']}: {seg['text']}" for seg in dialogue])
 
-        # Translate
-        lang = detect_language_from_country(jf_path.stem)
-        english_text = translate_to_english(full_text, lang)
+        # Use number-based language guess already saved
+        lang = call_json.get("language_detected") or "en"
+        english_text = translate_to_english(full_text, lang) if lang != "en" else full_text
         italian_text = translate_en_to_it(english_text)
 
-        # Scoring
         score, missing, comment = score_text(english_text)
 
-        # Update JSON file
-        record = json.loads(jf_path.read_text())
-        record["language_detected"] = lang
-        record["translation"] = {
-            "english": english_text,
-            "italian": italian_text
-        }
-        record["scoring"] = {
-            "total": score,
-            "missing": missing,
-            "comment": comment
-        }
+        # Update JSON
+        record = json.loads(jf_path.read_text(encoding="utf-8"))
+        record["translation"] = {"english": english_text, "italian": italian_text}
+        record["scoring"] = {"total": score, "missing": missing, "comment": comment}
         record["dialogue"] = dialogue
-
         jf_path.write_text(json.dumps(record, indent=2))
-        logging.info(f"✅ Processed and saved → {jf_path.name}")
+
+        logging.info(f"✅ Processed & saved → {jf_path.name}")
 
     except Exception as e:
-        logging.error(f"❌ Processing failed: {e}")
+        logging.exception("Processing failed")
 
 
 # ==============================
 # MAIN
 # ==============================
 if __name__ == "__main__":
-    print("🚀 Running → http://127.0.0.1:5000")
+    logging.info("🚀 Running → http://127.0.0.1:5000")
     app.run(host="0.0.0.0", port=5000, debug=True)

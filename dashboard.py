@@ -11,35 +11,10 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from werkzeug.security import generate_password_hash, check_password_hash
 
-# ==============================
-# PATHS & DIRECTORIES
-# ==============================
 ROOT = Path(__file__).resolve().parent
 RECORDINGS_DIR = ROOT / "recordings"
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ==============================
-# ADMIN LOGIN SYSTEM
-# ==============================
-CREDS_FILE = ROOT / "admin_creds.json"
-
-def get_admin_creds():
-    if not CREDS_FILE.exists():
-        creds = {"username": "admin", "password_hash": generate_password_hash("ChangeMe123!")}
-        CREDS_FILE.write_text(json.dumps(creds))
-        print("⚠️ Default admin created: username=admin | password=ChangeMe123!")
-    else:
-        creds = json.loads(CREDS_FILE.read_text())
-    return creds
-
-def save_admin_creds(username, new_pw):
-    creds = {"username": username, "password_hash": generate_password_hash(new_pw)}
-    CREDS_FILE.write_text(json.dumps(creds))
-    print(f"✅ Password updated for {username}")
-
-# ==============================
-# FLASK SETUP
-# ==============================
 app = Flask(__name__, static_folder="static", template_folder="templates")
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "replace_this_secret_key")
 
@@ -51,9 +26,7 @@ def login_required(f):
         return f(*args, **kwargs)
     return wrapped
 
-# ==============================
-# HELPERS
-# ==============================
+# ---- helpers ----
 def _safe_json_load(p: Path):
     try:
         txt = p.read_text(encoding="utf-8").strip()
@@ -63,6 +36,32 @@ def _safe_json_load(p: Path):
     except Exception:
         return None
 
+def _format_mmss(seconds: int) -> str:
+    if seconds is None:
+        return "0s"
+    try:
+        seconds = int(seconds)
+        m, s = divmod(seconds, 60)
+        if m > 0:
+            return f"{m}m{s:02d}s"
+        return f"{s}s"
+    except Exception:
+        return "0s"
+
+def _pretty_duration(dur):
+    """
+    Voiso sends duration sometimes as:
+      {"total": 118, "dialing_time": 11, "talk_time": 108}
+    We want to show talk_time as mm:ss.
+    If a plain int is sent, show that.
+    """
+    if isinstance(dur, dict):
+        talk = dur.get("talk_time")
+        return _format_mmss(talk)
+    if isinstance(dur, (int, float, str)) and str(dur).isdigit():
+        return _format_mmss(int(dur))
+    return str(dur)
+
 def load_all_calls():
     rows = []
     for f in RECORDINGS_DIR.glob("call_*.json"):
@@ -70,6 +69,7 @@ def load_all_calls():
         if not d:
             continue
         d["_id"] = f.stem.replace("call_", "")
+        # defaults
         d.setdefault("agent_name", "Unknown")
         d.setdefault("customer_phone", "Unknown")
         d.setdefault("duration", "N/A")
@@ -77,66 +77,33 @@ def load_all_calls():
         d.setdefault("language_detected", "Unknown")
         d.setdefault("translation", {"english": "", "italian": ""})
         d.setdefault("scoring", {"total": 0, "missing": [], "comment": ""})
+
+        # 👇 override duration for display
+        d["duration_display"] = _pretty_duration(d.get("duration"))
         rows.append(d)
     return sorted(rows, key=lambda x: x.get("timestamp", ""), reverse=True)
 
-# ==============================
-# AUTH ROUTES
-# ==============================
+# ---- AUTH ROUTES (kept minimal for compatibility with app.py) ----
 @app.route("/login", methods=["GET", "POST"])
 def login():
-    creds = get_admin_creds()
+    # app.py handles full auth; this exists for direct dashboard run
+    creds_file = ROOT / "admin_creds.json"
     if request.method == "POST":
-        u = request.form.get("username", "").strip()
-        p = request.form.get("password", "").strip()
-        if u == creds["username"] and check_password_hash(creds["password_hash"], p):
-            session["admin"] = u
-            flash("✅ Logged in successfully", "success")
-            return redirect(url_for("dashboard"))
-        flash("❌ Invalid username or password", "danger")
+        if creds_file.exists():
+            creds = json.loads(creds_file.read_text())
+            u = request.form.get("username","").strip()
+            p = request.form.get("password","").strip()
+            if u == creds.get("username") and check_password_hash(creds.get("password_hash",""), p):
+                session["admin"] = u
+                return redirect(url_for("dashboard"))
+        flash("Invalid login", "danger")
     return render_template("login.html")
 
-@app.route("/logout")
-def logout():
-    session.clear()
-    flash("Logged out successfully", "info")
-    return redirect(url_for("login"))
-
-@app.route("/change-password", methods=["GET", "POST"])
-@login_required
-def change_password():
-    creds = get_admin_creds()
-    if request.method == "POST":
-        old_pw = request.form.get("old_password", "")
-        new_pw = request.form.get("new_password", "")
-        confirm_pw = request.form.get("confirm_password", "")
-        if not check_password_hash(creds["password_hash"], old_pw):
-            flash("Old password incorrect", "danger")
-        elif new_pw != confirm_pw:
-            flash("New passwords do not match", "warning")
-        elif len(new_pw) < 6:
-            flash("Password too short (min 6 chars)", "warning")
-        else:
-            save_admin_creds(creds["username"], new_pw)
-            flash("✅ Password changed successfully!", "success")
-            return redirect(url_for("dashboard"))
-    return render_template("change_password.html")
-
-@app.route("/forgot-password", methods=["GET", "POST"])
-def forgot_password():
-    if request.method == "POST":
-        save_admin_creds("admin", "ChangeMe123!")
-        flash("🔁 Password reset to default (admin / ChangeMe123!)", "info")
-        return redirect(url_for("login"))
-    return render_template("forgot_password.html")
-
-# ==============================
-# DASHBOARD & DATA ROUTES
-# ==============================
 @app.route("/")
 def home():
     return redirect(url_for("dashboard"))
 
+# ---- DASHBOARD ----
 @app.route("/dashboard")
 @login_required
 def dashboard():
@@ -144,7 +111,8 @@ def dashboard():
     agent_q = (request.args.get("agent") or "").strip().lower()
     lang_q = (request.args.get("lang") or "").strip().lower()
     phone_q = (request.args.get("phone") or "").strip()
-    status_q = (request.args.get("status") or "").strip().lower()
+    # ✅ default to "answered" if not specified
+    status_q = (request.args.get("status") or "answered").strip().lower()
 
     all_calls = load_all_calls()
     filtered = []
@@ -152,37 +120,31 @@ def dashboard():
     for r in all_calls:
         if q and q not in r["translation"]["english"].lower():
             continue
-        if agent_q and agent_q not in r["agent_name"].lower():
+        if agent_q and agent_q not in (r.get("agent_name") or "").lower():
             continue
-        if lang_q and lang_q != r["language_detected"].lower():
+        if lang_q and lang_q != (r.get("language_detected") or "").lower():
             continue
-        if phone_q and phone_q not in r["customer_phone"]:
+        if phone_q and phone_q not in (r.get("customer_phone") or ""):
             continue
-        if status_q and status_q != r["call_status"].lower():
+        # ✅ default status applied here
+        if status_q and status_q != (r.get("call_status") or "").lower():
             continue
         filtered.append(r)
 
-    agents = sorted(set([r["agent_name"] for r in all_calls]))
-    langs = sorted(set([r["language_detected"] for r in all_calls]))
-    statuses = sorted(set([r["call_status"] for r in all_calls]))
+    agents = sorted(set([r.get("agent_name") for r in all_calls if r.get("agent_name")]))
+    langs = sorted(set([r.get("language_detected") for r in all_calls if r.get("language_detected")]))
+    statuses = sorted(set([r.get("call_status") for r in all_calls if r.get("call_status")]))
 
+    # NOTE: your template likely prints {{ item.duration }}.
+    # To align column data to header, print {{ item.duration_display }}
+    # in templates/index.html where Duration column is rendered.
     return render_template(
         "index.html",
         items=filtered, agents=agents, langs=langs, statuses=statuses,
         q=q, agent=agent_q, lang=lang_q, phone=phone_q, status=status_q
     )
 
-@app.route("/call/<cid>")
-@login_required
-def call_detail(cid):
-    jf = RECORDINGS_DIR / f"call_{cid}.json"
-    if not jf.exists():
-        abort(404)
-    d = _safe_json_load(jf)
-    if not d:
-        abort(404)
-    return render_template("detail.html", d=d, cid=cid)
-
+# ---- CSV / PDF (kept for feature parity) ----
 @app.route("/export/csv")
 @login_required
 def export_csv():
@@ -218,14 +180,14 @@ def report_pdf(cid):
     c.setFont("Helvetica", 11)
     line(f"Timestamp: {d.get('timestamp', '')}")
     line(f"Agent: {d.get('agent_name', 'Unknown')} | Customer: {d.get('customer_phone', 'Unknown')}")
-    line(f"Language: {d.get('language_detected', 'Unknown')} | Duration: {d.get('duration', 'N/A')} | Status: {d.get('call_status', 'Unknown')}")
+    line(f"Language: {d.get('language_detected', 'Unknown')} | Duration: {_pretty_duration(d.get('duration'))} | Status: {d.get('call_status', 'Unknown')}")
     s = d.get("scoring", {})
     line(f"Score: {s.get('total', 0)} / 100")
     if s.get("missing"):
         line("Missing KPIs: " + ", ".join(s["missing"]))
     line("")
     line("Transcript (EN):", 18)
-    for chunk in (d["translation"].get("english", "")).split("\n"):
+    for chunk in (d.get("translation", {}).get("english", "")).split("\n"):
         line(chunk)
         if y < 80:
             c.showPage()
@@ -238,11 +200,3 @@ def report_pdf(cid):
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"}), 200
-    
-
-# ==============================
-# MAIN
-# ==============================
-if __name__ == "__main__":
-    print("🖥️ Dashboard running at http://127.0.0.1:5001")
-    app.run(host="0.0.0.0", port=5001, debug=True)
