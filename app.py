@@ -72,17 +72,28 @@ def _translate(text, name):
     return tok.decode(out[0], skip_special_tokens=True)
 
 def translate_to_english(text, lang):
+    """Best-effort: agar translation fail ho jaye to original text hi return karo."""
     try:
+        if not text.strip():
+            return ""
+        # Agar already English hai, direct return
+        if (lang or "").lower() == "en":
+            return text
         model = TO_EN.get(lang, FALLBACK)
         return _translate(text, model)
-    except Exception:
-        return _translate(text, FALLBACK)
+    except Exception as e:
+        logging.warning(f"EN translation skipped (fallback to source). Reason: {e}")
+        return text  # scoring ke liye English hi treat karenge
 
 def translate_en_to_it(text):
+    """Best-effort: IT fail ho to empty string (UI clean rahega)."""
     try:
+        if not text.strip():
+            return ""
         return _translate(text, EN_TO_IT)
-    except Exception:
-        return text
+    except Exception as e:
+        logging.warning(f"IT translation skipped. Reason: {e}")
+        return ""
 
 # ==============================
 # LANGUAGE DETECTION
@@ -384,13 +395,16 @@ def voiso_webhook():
 
 
 def process_voiso_call(call_json: dict, jf_path: Path):
-    """Download, transcribe, translate, and score the call."""
+    """Download, transcribe, translate, and score the call — accuracy-first, safe on memory."""
+    import subprocess, traceback, os
+
     try:
         recording_url = call_json.get("recording_url")
         if not recording_url:
-            logging.warning("No recording URL in payload.")
+            logging.warning("❌ No recording URL in payload.")
             return
 
+        # === 1️⃣ Download recording ===
         audio_path = RECORDINGS_DIR / f"{jf_path.stem}.mp3"
         logging.info(f"⬇️ Downloading audio: {recording_url}")
         with requests.get(recording_url, stream=True, timeout=120) as r:
@@ -398,31 +412,68 @@ def process_voiso_call(call_json: dict, jf_path: Path):
             with open(audio_path, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
+        logging.info(f"💾 Saved: {audio_path.name}")
 
-        logging.info(f"🎙️ Transcribing {audio_path.name} …")
-        segments, _ = whisper_model.transcribe(str(audio_path), beam_size=5)
+        # === 2️⃣ Convert MP3 → WAV (more stable for Whisper) ===
+        wav_path = audio_path.with_suffix(".wav")
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", str(audio_path), "-ar", "16000", str(wav_path)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
+            )
+            logging.info(f"🎧 Converted to WAV: {wav_path.name}")
+            audio_for_asr = str(wav_path)
+        except Exception as e:
+            logging.warning(f"⚠️ FFmpeg conversion failed ({e}); using MP3 directly.")
+            audio_for_asr = str(audio_path)
+
+        # === 3️⃣ Transcribe ===
+        logging.info(f"🗣️  Transcribing {os.path.basename(audio_for_asr)} …")
+        segments, _ = whisper_model.transcribe(audio_for_asr, beam_size=3, vad_filter=True)
+
+        text_segments = [seg.text.strip() for seg in segments if getattr(seg, "text", "").strip()]
+        if not text_segments:
+            logging.warning("⚠️ No text decoded from audio.")
+            record = json.loads(jf_path.read_text(encoding="utf-8"))
+            record["translation"] = {"english": "", "italian": ""}
+            record["scoring"] = {"total": 0, "missing": list(score_text('')[1]), "comment": "No speech detected"}
+            record["dialogue"] = []
+            jf_path.write_text(json.dumps(record, indent=2))
+            return
+
+        # === 4️⃣ Simple diarization (gap-based) ===
         dialogue = diarize(segments)
-        # Combine text in chronological order
         full_text = "\n".join([f"{seg['speaker']}: {seg['text']}" for seg in dialogue])
 
-        # Use number-based language guess already saved
-        lang = call_json.get("language_detected") or "en"
-        english_text = translate_to_english(full_text, lang) if lang != "en" else full_text
+        # === 5️⃣ Language detection & translation ===
+        lang = (call_json.get("language_detected") or "en").lower()
+        english_text = translate_to_english(full_text, lang)
         italian_text = translate_en_to_it(english_text)
 
+        # === 6️⃣ Scoring ===
         score, missing, comment = score_text(english_text)
 
-        # Update JSON
+        # === 7️⃣ Update JSON record ===
         record = json.loads(jf_path.read_text(encoding="utf-8"))
         record["translation"] = {"english": english_text, "italian": italian_text}
         record["scoring"] = {"total": score, "missing": missing, "comment": comment}
         record["dialogue"] = dialogue
         jf_path.write_text(json.dumps(record, indent=2))
 
-        logging.info(f"✅ Processed & saved → {jf_path.name}")
+        logging.info(f"✅ Processed & saved → {jf_path.name} | Score={score}")
 
     except Exception as e:
-        logging.exception("Processing failed")
+        logging.error(f"❌ Error processing {jf_path.name}: {e}\n{traceback.format_exc()}")
+
+    finally:
+        # === 8️⃣ Cleanup temp files ===
+        for f in [audio_path, wav_path]:
+            try:
+                if f.exists():
+                    f.unlink()
+                    logging.debug(f"🧹 Deleted temp: {f}")
+            except Exception:
+                pass
 
 
 # ==============================
