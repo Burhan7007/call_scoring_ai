@@ -1,54 +1,72 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="filters" style="padding:16px 22px">
+<div class="filters" style="padding:16px 22px;">
   <form method="get" style="display:flex;gap:10px;flex-wrap:wrap;">
-    <input name="q" value="{{ request.args.get('q','') }}" placeholder="Search transcript (EN)...">
-    <input name="phone" value="{{ request.args.get('phone','') }}" placeholder="Customer phone...">
-    <select name="agent">
+    <input name="q" value="{{ request.args.get('q','') }}" placeholder="Search transcript (EN)..." style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
+    <input name="phone" value="{{ request.args.get('phone','') }}" placeholder="Customer phone..." style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
+    
+    <select name="agent" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
       <option value="">All Agents</option>
       {% for a in agents %}
         <option value="{{ a }}" {% if request.args.get('agent','')==a %}selected{% endif %}>{{ a }}</option>
       {% endfor %}
     </select>
-    <select name="lang">
+
+    <select name="lang" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
       <option value="">All Languages</option>
       {% for l in langs %}
         <option value="{{ l }}" {% if request.args.get('lang','')==l %}selected{% endif %}>{{ l }}</option>
       {% endfor %}
     </select>
-    <select name="status">
+
+    <select name="status" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
       <option value="">All Statuses</option>
       {% for s in statuses %}
         <option value="{{ s }}" {% if request.args.get('status','')==s %}selected{% endif %}>{{ s }}</option>
       {% endfor %}
     </select>
-    <button class="btn" type="submit">Filter</button>
+
+    <button class="btn" type="submit" style="padding:6px 14px;background:#2563eb;color:white;border:none;border-radius:6px;cursor:pointer;">
+      Filter
+    </button>
   </form>
 </div>
 
-<table style="width:100%;border-collapse:collapse;margin:0 22px 30px">
+<table style="width:100%;border-collapse:collapse;margin:0 22px 30px;">
   <thead>
-    <tr>
-      <th>Agent</th><th>Customer</th><th>Language</th><th>Duration</th><th>Status</th><th>Score</th><th>Actions</th>
+    <tr style="text-align:left;background:#101b2d;">
+      <th style="padding:10px 8px;">Agent</th>
+      <th style="padding:10px 8px;">Customer</th>
+      <th style="padding:10px 8px;">Language</th>
+      <th style="padding:10px 8px;">Duration</th>
+      <th style="padding:10px 8px;">Status</th>
+      <th style="padding:10px 8px;">Score</th>
+      <th style="padding:10px 8px;">Actions</th>
     </tr>
   </thead>
-  <tbody>
+
+  <tbody style="text-align:left;">
     {% for item in items %}
-      <tr>
-        <td>{{ item.agent_name }}</td>
-        <td>{{ item.customer_phone }}</td>
-        <td>{{ item.language_detected }}</td>
-        <td>{{ item.duration_display }}</td>
-        <td>{{ item.call_status }}</td>
-        <td>{{ item.scoring.total }}</td>
-        <td>
-          <a href="{{ url_for('detail', cid=item._id) }}">View</a> |
-          <a href="{{ url_for('report_pdf', cid=item._id) }}">PDF</a>
+      <tr style="border-bottom:1px solid #1e293b;">
+        <td style="padding:8px 8px;">{{ item.agent_name }}</td>
+        <td style="padding:8px 8px;">{{ item.customer_phone }}</td>
+        <td style="padding:8px 8px;">{{ item.language_detected }}</td>
+        <td style="padding:8px 8px;">{{ item.duration_display }}</td>
+        <td style="padding:8px 8px;">{{ item.call_status }}</td>
+        <td style="padding:8px 8px;">{{ item.scoring.total }}</td>
+        <td style="padding:8px 8px;">
+          <a href="{{ url_for('detail', cid=item._id) }}" style="color:#60a5fa;">View</a> |
+          <a href="{{ url_for('report_pdf', cid=item._id) }}" style="color:#34d399;">PDF</a>
         </td>
       </tr>
     {% endfor %}
+
     {% if items|length == 0 %}
-      <tr><td colspan="7" style="color:#9fb3d9;text-align:center">No results found.</td></tr>
+      <tr>
+        <td colspan="7" style="color:#9fb3d9;text-align:center;padding:14px;">
+          No results found.
+        </td>
+      </tr>
     {% endif %}
   </tbody>
 </table>
