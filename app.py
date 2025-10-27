@@ -189,62 +189,75 @@ def fetch_voiso(uuid):
         print("⚠️ fetch_voiso:", e)
     return {}
 
-# ==============================
-# FIXED process_audio()
-# ==============================
 def process_audio(file_path: Path, uuid=None):
     print(f"🎧 Transcribing {file_path.name}")
     try:
-        # Pass 1: Transcribe with VAD on (clean)
+        # Pass 1: Transcribe with VAD filter for clarity
         segments, info = whisper_model.transcribe(str(file_path), vad_filter=True, beam_size=5)
         raw = [s for s in segments if s.text.strip()]
         txt = " ".join([s.text.strip() for s in raw])
 
-        # Pass 2 fallback: reprocess if text too short
-        if len(txt.split()) < 15:
-            print("⚠️ Fallback pass — capturing missed speech...")
+        # Pass 2 fallback: if transcription seems too short or repetitive, reprocess without VAD
+        if len(txt.split()) < 15 or len(set(txt.split())) < 5:
+            print("⚠️ Fallback pass — reprocessing without VAD for missed speech...")
             segments, info = whisper_model.transcribe(str(file_path), vad_filter=False, beam_size=5)
             raw = [s for s in segments if s.text.strip()]
             txt = " ".join([s.text.strip() for s in raw])
 
-        # Build diarized conversation
+        # Build improved diarized dialogue (Agent/Client)
         dialogue = diarize(raw)
 
-        # If diarization failed (only one side), fallback to single speaker
+        # Fallback: force alternation if only one speaker detected
         if len({d["speaker"] for d in dialogue}) < 2:
-            print("⚠️ Diarization fallback — forcing Agent/Client alternation")
+            print("⚠️ Diarization fallback — alternating speakers for balance")
             dialogue = []
             cur = "Agent"
             for idx, seg in enumerate(raw):
-                dialogue.append({"speaker": cur, "text": seg.text.strip(), "start": seg.start, "end": seg.end})
+                dialogue.append({
+                    "speaker": cur,
+                    "text": seg.text.strip(),
+                    "start": seg.start,
+                    "end": seg.end
+                })
                 if idx % 2 == 1:
                     cur = "Client" if cur == "Agent" else "Agent"
 
-        # Detect language from Whisper info or phone prefix
+        # Detect language from Whisper or phone prefix
         lang = (info.language or "").lower() or "en"
         cdr = fetch_voiso(uuid) if uuid else {}
         if lang == "unknown" or not lang:
             lang = detect_language_from_country(cdr.get("to") or cdr.get("from"))
 
-        # Rebuild transcript using dialogue text
-        combined_text = " ".join([d["text"] for d in dialogue]).strip()
+        # ✅ Build complete transcript from the final dialogue
+        combined_text = " ".join([d["text"] for d in dialogue if d.get("text")]).strip()
 
-        # Translate full conversation for scoring
-        en = combined_text if lang == "en" else translate_to_english(combined_text, lang)
+        # Fallback: if transcript still too short, rebuild from raw segments
+        if len(combined_text.split()) < 20:
+            print("⚠️ Transcript too short — regenerating from raw segments")
+            combined_text = " ".join([s.text.strip() for s in raw if s.text.strip()])
+
+        # Translate using the complete dialogue text
+        if lang == "en":
+            en = combined_text
+        else:
+            en = translate_to_english(combined_text, lang)
+
         it = translate_en_to_it(en)
 
-        # Scoring fix — ignore filler noise-only transcripts
-        meaningful = any(k in en.lower() for k in ["hello", "thank", "confirm", "product", "address", "please", "order"])
-        if not meaningful and len(en.split()) < 25:
-            total, missing, comment = 0, list(score_text(en)[1]), "Low-confidence / noisy call"
-        else:
-            total, missing, comment = score_text(en)
-
-        # Group text by speaker
+        # Separate Agent and Client text for logs or exports
         agent_text = " ".join([x["text"] for x in dialogue if x["speaker"] == "Agent"])
         client_text = " ".join([x["text"] for x in dialogue if x["speaker"] == "Client"])
 
-        # Prepare and save result
+        # Fix scoring logic — ignore low-meaning transcripts
+        meaningful = any(k in en.lower() for k in [
+            "hello", "thank", "confirm", "product", "address", "please", "order", "good morning", "afternoon"
+        ])
+        if not meaningful and len(en.split()) < 25:
+            total, missing, comment = 0, list(score_text(en)[1]), "Low-confidence / noisy or incomplete call"
+        else:
+            total, missing, comment = score_text(en)
+
+        # Final structured result
         res = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "agent_name": cdr.get("agent", "Unknown"),
@@ -258,6 +271,7 @@ def process_audio(file_path: Path, uuid=None):
             "scoring": {"total": total, "missing": missing, "comment": comment},
         }
 
+        # Save JSON result
         tmp = file_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.rename(file_path.with_suffix(".json"))
@@ -267,6 +281,7 @@ def process_audio(file_path: Path, uuid=None):
     except Exception as e:
         print("❌ process_audio error:", e)
         return {}
+
 
 
 # ==============================
