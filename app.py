@@ -244,28 +244,27 @@ def process_audio(file_path: Path, uuid=None):
             en_agent_lines = [translate_to_english(t, lang) for t in agent_lines]
             en_client_lines = [translate_to_english(t, lang) for t in client_lines]
 
-        en_full = " ".join(en_agent_lines + en_client_lines)
+        en_full = "\n".join([f"Agent: {a}" for a in en_agent_lines] + [f"Client: {c}" for c in en_client_lines])
 
         # Italian translations (also per-speaker)
         it_agent_lines = [translate_en_to_it(t) for t in en_agent_lines]
         it_client_lines = [translate_en_to_it(t) for t in en_client_lines]
-        it_full = " ".join(it_agent_lines + it_client_lines)
+        it_full = "\n".join([f"Agente: {a}" for a in it_agent_lines] + [f"Cliente: {c}" for c in it_client_lines])
 
+        # ✅ Properly formatted transcripts (like Dialogue)
         translation = {
-            "english": {
-                "agent": " ".join(en_agent_lines).strip(),
-                "client": " ".join(en_client_lines).strip(),
-                "full": en_full.strip()
-            },
-            "italian": {
-                "agent": " ".join(it_agent_lines).strip(),
-                "client": " ".join(it_client_lines).strip(),
-                "full": it_full.strip()
-            }
+            "english": (
+                "Agent: " + " ".join(en_agent_lines).strip() + "\n"
+                + "Client: " + " ".join(en_client_lines).strip()
+            ).strip(),
+            "italian": (
+                "Agente: " + " ".join(it_agent_lines).strip() + "\n"
+                + "Cliente: " + " ".join(it_client_lines).strip()
+            ).strip(),
         }
 
         # ✅ Improved scoring logic (based only on Agent's English)
-        en_agent = translation["english"]["agent"]
+        en_agent = " ".join(en_agent_lines)
         word_count = len(en_agent.split())
         meaningful = any(k in en_agent.lower() for k in [
             "hello", "thank", "confirm", "product", "address", "please", "order",
@@ -302,6 +301,7 @@ def process_audio(file_path: Path, uuid=None):
     except Exception as e:
         print("❌ process_audio error:", e)
         return {}
+
 
 
 
