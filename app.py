@@ -197,14 +197,14 @@ def process_audio(file_path: Path, uuid=None):
         raw = [s for s in segments if s.text.strip()]
         txt = " ".join([s.text.strip() for s in raw])
 
-        # Pass 2 fallback: if too short or repetitive, retry without VAD
+        # Pass 2 fallback: retry without VAD if too short or repetitive
         if len(txt.split()) < 15 or len(set(txt.split())) < 5:
             print("⚠️ Fallback pass — reprocessing without VAD (to capture missed speech)")
             segments, info = whisper_model.transcribe(str(file_path), vad_filter=False, beam_size=5)
             raw = [s for s in segments if s.text.strip()]
             txt = " ".join([s.text.strip() for s in raw])
 
-        # Apply diarization (Agent/Client split)
+        # Improved diarization (Agent/Client alternation)
         dialogue = diarize(raw)
 
         # Fallback: alternate if only one speaker detected
@@ -222,52 +222,64 @@ def process_audio(file_path: Path, uuid=None):
                 if idx % 2 == 1:
                     cur = "Client" if cur == "Agent" else "Agent"
 
-        # Detect language from Whisper or phone prefix
+        # Detect language (Whisper or phone prefix)
         lang = (info.language or "").lower() or "en"
         cdr = fetch_voiso(uuid) if uuid else {}
         if lang == "unknown" or not lang:
             lang = detect_language_from_country(cdr.get("to") or cdr.get("from"))
 
-        # Build full transcript from dialogue text
+        # Build clean text for fallback scoring
         combined_text = " ".join([d["text"] for d in dialogue if d.get("text")]).strip()
-
-        # Fallback if Whisper missed speech
         if len(combined_text.split()) < 20:
             print("⚠️ Transcript too short — regenerating from raw segments")
             combined_text = " ".join([s.text.strip() for s in raw if s.text.strip()])
 
-        # ✅ Translate for both Agent and Client parts separately
-        agent_text = " ".join([x["text"] for x in dialogue if x["speaker"] == "Agent"]).strip()
-        client_text = " ".join([x["text"] for x in dialogue if x["speaker"] == "Client"]).strip()
+        # ✅ Translate each dialogue line speaker-wise (mirrors Dialogue section)
+        agent_lines = [x["text"] for x in dialogue if x["speaker"] == "Agent"]
+        client_lines = [x["text"] for x in dialogue if x["speaker"] == "Client"]
 
         if lang == "en":
-            en_agent, en_client = agent_text, client_text
-            en_full = combined_text
+            en_agent_lines, en_client_lines = agent_lines, client_lines
         else:
-            en_agent = translate_to_english(agent_text, lang) if agent_text else ""
-            en_client = translate_to_english(client_text, lang) if client_text else ""
-            en_full = translate_to_english(combined_text, lang)
+            en_agent_lines = [translate_to_english(t, lang) for t in agent_lines]
+            en_client_lines = [translate_to_english(t, lang) for t in client_lines]
 
-        # Italian translations (Agent/Client divided too)
-        it_agent = translate_en_to_it(en_agent)
-        it_client = translate_en_to_it(en_client)
-        it_full = translate_en_to_it(en_full)
+        en_full = " ".join(en_agent_lines + en_client_lines)
 
-        # Improved scoring logic — avoid false zeros
-        meaningful = any(k in en_full.lower() for k in [
+        # Italian translations (also per-speaker)
+        it_agent_lines = [translate_en_to_it(t) for t in en_agent_lines]
+        it_client_lines = [translate_en_to_it(t) for t in en_client_lines]
+        it_full = " ".join(it_agent_lines + it_client_lines)
+
+        translation = {
+            "english": {
+                "agent": " ".join(en_agent_lines).strip(),
+                "client": " ".join(en_client_lines).strip(),
+                "full": en_full.strip()
+            },
+            "italian": {
+                "agent": " ".join(it_agent_lines).strip(),
+                "client": " ".join(it_client_lines).strip(),
+                "full": it_full.strip()
+            }
+        }
+
+        # ✅ Improved scoring logic (based only on Agent's English)
+        en_agent = translation["english"]["agent"]
+        word_count = len(en_agent.split())
+        meaningful = any(k in en_agent.lower() for k in [
             "hello", "thank", "confirm", "product", "address", "please", "order",
             "good morning", "afternoon", "call", "customer", "service"
         ])
-        word_count = len(en_full.split())
 
         if word_count < 20:
             total, missing, comment = 0, [], "Low-content or very short call (under 20 words)"
         elif not meaningful and word_count < 40:
             total, missing, comment = 0, [], "Likely non-meaningful / background noise"
         else:
-            total, missing, comment = score_text(en_full)
+            total, missing, comment = score_text(en_agent)
 
-        # Build final structured result
+        # Final structured result
         res = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "agent_name": cdr.get("agent", "Unknown"),
@@ -275,18 +287,7 @@ def process_audio(file_path: Path, uuid=None):
             "duration": cdr.get("duration", "N/A"),
             "call_status": cdr.get("disposition", "Unknown"),
             "language_detected": lang,
-            "translation": {
-                "english": {
-                    "agent": en_agent,
-                    "client": en_client,
-                    "full": en_full
-                },
-                "italian": {
-                    "agent": it_agent,
-                    "client": it_client,
-                    "full": it_full
-                }
-            },
+            "translation": translation,
             "dialogue": dialogue,
             "scoring": {"total": total, "missing": missing, "comment": comment},
         }
@@ -301,6 +302,7 @@ def process_audio(file_path: Path, uuid=None):
     except Exception as e:
         print("❌ process_audio error:", e)
         return {}
+
 
 
 
