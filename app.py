@@ -192,24 +192,24 @@ def fetch_voiso(uuid):
 def process_audio(file_path: Path, uuid=None):
     print(f"🎧 Transcribing {file_path.name}")
     try:
-        # Pass 1: Transcribe with VAD filter for clarity
+        # Pass 1: Transcribe with VAD filter for cleaner segmentation
         segments, info = whisper_model.transcribe(str(file_path), vad_filter=True, beam_size=5)
         raw = [s for s in segments if s.text.strip()]
         txt = " ".join([s.text.strip() for s in raw])
 
-        # Pass 2 fallback: if transcription seems too short or repetitive, reprocess without VAD
+        # Pass 2 fallback: if too short or repetitive, retry without VAD
         if len(txt.split()) < 15 or len(set(txt.split())) < 5:
-            print("⚠️ Fallback pass — reprocessing without VAD for missed speech...")
+            print("⚠️ Fallback pass — reprocessing without VAD (to capture missed speech)")
             segments, info = whisper_model.transcribe(str(file_path), vad_filter=False, beam_size=5)
             raw = [s for s in segments if s.text.strip()]
             txt = " ".join([s.text.strip() for s in raw])
 
-        # Build improved diarized dialogue (Agent/Client)
+        # Apply diarization (Agent/Client split)
         dialogue = diarize(raw)
 
-        # Fallback: force alternation if only one speaker detected
+        # Fallback: alternate if only one speaker detected
         if len({d["speaker"] for d in dialogue}) < 2:
-            print("⚠️ Diarization fallback — alternating speakers for balance")
+            print("⚠️ Diarization fallback — alternating Agent/Client")
             dialogue = []
             cur = "Agent"
             for idx, seg in enumerate(raw):
@@ -228,36 +228,46 @@ def process_audio(file_path: Path, uuid=None):
         if lang == "unknown" or not lang:
             lang = detect_language_from_country(cdr.get("to") or cdr.get("from"))
 
-        # ✅ Build complete transcript from the final dialogue
+        # Build full transcript from dialogue text
         combined_text = " ".join([d["text"] for d in dialogue if d.get("text")]).strip()
 
-        # Fallback: if transcript still too short, rebuild from raw segments
+        # Fallback if Whisper missed speech
         if len(combined_text.split()) < 20:
             print("⚠️ Transcript too short — regenerating from raw segments")
             combined_text = " ".join([s.text.strip() for s in raw if s.text.strip()])
 
-        # Translate using the complete dialogue text
+        # ✅ Translate for both Agent and Client parts separately
+        agent_text = " ".join([x["text"] for x in dialogue if x["speaker"] == "Agent"]).strip()
+        client_text = " ".join([x["text"] for x in dialogue if x["speaker"] == "Client"]).strip()
+
         if lang == "en":
-            en = combined_text
+            en_agent, en_client = agent_text, client_text
+            en_full = combined_text
         else:
-            en = translate_to_english(combined_text, lang)
+            en_agent = translate_to_english(agent_text, lang) if agent_text else ""
+            en_client = translate_to_english(client_text, lang) if client_text else ""
+            en_full = translate_to_english(combined_text, lang)
 
-        it = translate_en_to_it(en)
+        # Italian translations (Agent/Client divided too)
+        it_agent = translate_en_to_it(en_agent)
+        it_client = translate_en_to_it(en_client)
+        it_full = translate_en_to_it(en_full)
 
-        # Separate Agent and Client text for logs or exports
-        agent_text = " ".join([x["text"] for x in dialogue if x["speaker"] == "Agent"])
-        client_text = " ".join([x["text"] for x in dialogue if x["speaker"] == "Client"])
-
-        # Fix scoring logic — ignore low-meaning transcripts
-        meaningful = any(k in en.lower() for k in [
-            "hello", "thank", "confirm", "product", "address", "please", "order", "good morning", "afternoon"
+        # Improved scoring logic — avoid false zeros
+        meaningful = any(k in en_full.lower() for k in [
+            "hello", "thank", "confirm", "product", "address", "please", "order",
+            "good morning", "afternoon", "call", "customer", "service"
         ])
-        if not meaningful and len(en.split()) < 25:
-            total, missing, comment = 0, list(score_text(en)[1]), "Low-confidence / noisy or incomplete call"
-        else:
-            total, missing, comment = score_text(en)
+        word_count = len(en_full.split())
 
-        # Final structured result
+        if word_count < 20:
+            total, missing, comment = 0, [], "Low-content or very short call (under 20 words)"
+        elif not meaningful and word_count < 40:
+            total, missing, comment = 0, [], "Likely non-meaningful / background noise"
+        else:
+            total, missing, comment = score_text(en_full)
+
+        # Build final structured result
         res = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "agent_name": cdr.get("agent", "Unknown"),
@@ -265,13 +275,23 @@ def process_audio(file_path: Path, uuid=None):
             "duration": cdr.get("duration", "N/A"),
             "call_status": cdr.get("disposition", "Unknown"),
             "language_detected": lang,
-            "translation": {"english": en, "italian": it},
-            "transcripts": {"agent": agent_text, "client": client_text},
+            "translation": {
+                "english": {
+                    "agent": en_agent,
+                    "client": en_client,
+                    "full": en_full
+                },
+                "italian": {
+                    "agent": it_agent,
+                    "client": it_client,
+                    "full": it_full
+                }
+            },
             "dialogue": dialogue,
             "scoring": {"total": total, "missing": missing, "comment": comment},
         }
 
-        # Save JSON result
+        # Save output JSON
         tmp = file_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.rename(file_path.with_suffix(".json"))
@@ -281,6 +301,7 @@ def process_audio(file_path: Path, uuid=None):
     except Exception as e:
         print("❌ process_audio error:", e)
         return {}
+
 
 
 
