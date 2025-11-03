@@ -251,28 +251,25 @@ def process_audio(file_path: Path, uuid=None):
         it_client_lines = [translate_en_to_it(t) for t in en_client_lines]
         it_full = "\n".join([f"Agente: {a}" for a in it_agent_lines] + [f"Cliente: {c}" for c in it_client_lines])
 
-
-        # ✅ Dialogue-style transcripts (formatted line by line)
-        english_lines = []
-        for a in en_agent_lines:
-            if a.strip():
-                english_lines.append(f"• Agent: {a.strip()}")
-        for c in en_client_lines:
-            if c.strip():
-                english_lines.append(f"• Client: {c.strip()}")
-
-        italian_lines = []
-        for a in it_agent_lines:
-            if a.strip():
-                italian_lines.append(f"• Agente: {a.strip()}")
-        for c in it_client_lines:
-            if c.strip():
-                italian_lines.append(f"• Cliente: {c.strip()}")
+        # ✅ Dialogue-style transcripts (HTML formatted with bullets & bold speaker names)
+        def format_lines(agent_lines, client_lines, lang="en"):
+            html = "<ul>"
+            for a in agent_lines:
+                if a.strip():
+                    label = "Agent" if lang == "en" else "Agente"
+                    html += f"<li><b>{label}:</b> {a.strip()}</li>"
+            for c in client_lines:
+                if c.strip():
+                    label = "Client" if lang == "en" else "Cliente"
+                    html += f"<li><b>{label}:</b> {c.strip()}</li>"
+            html += "</ul>"
+            return html.strip()
 
         translation = {
-            "english": "\n".join(english_lines).strip(),
-            "italian": "\n".join(italian_lines).strip()
+            "english": format_lines(en_agent_lines, en_client_lines, "en"),
+            "italian": format_lines(it_agent_lines, it_client_lines, "it"),
         }
+
 
 
         # ✅ Improved scoring logic (based only on Agent's English)
