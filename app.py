@@ -251,17 +251,29 @@ def process_audio(file_path: Path, uuid=None):
         it_client_lines = [translate_en_to_it(t) for t in en_client_lines]
         it_full = "\n".join([f"Agente: {a}" for a in it_agent_lines] + [f"Cliente: {c}" for c in it_client_lines])
 
-        # ✅ Properly formatted transcripts (like Dialogue)
+
+        # ✅ Dialogue-style transcripts (formatted line by line)
+        english_lines = []
+        for a in en_agent_lines:
+            if a.strip():
+                english_lines.append(f"• Agent: {a.strip()}")
+        for c in en_client_lines:
+            if c.strip():
+                english_lines.append(f"• Client: {c.strip()}")
+
+        italian_lines = []
+        for a in it_agent_lines:
+            if a.strip():
+                italian_lines.append(f"• Agente: {a.strip()}")
+        for c in it_client_lines:
+            if c.strip():
+                italian_lines.append(f"• Cliente: {c.strip()}")
+
         translation = {
-            "english": (
-                "Agent: " + " ".join(en_agent_lines).strip() + "\n"
-                + "Client: " + " ".join(en_client_lines).strip()
-            ).strip(),
-            "italian": (
-                "Agente: " + " ".join(it_agent_lines).strip() + "\n"
-                + "Cliente: " + " ".join(it_client_lines).strip()
-            ).strip(),
+            "english": "\n".join(english_lines).strip(),
+            "italian": "\n".join(italian_lines).strip()
         }
+
 
         # ✅ Improved scoring logic (based only on Agent's English)
         en_agent = " ".join(en_agent_lines)
