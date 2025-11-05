@@ -18,10 +18,14 @@
   {% endif %}
 
   <h4>Transcript (English)</h4>
-  <pre style="background:#0f1a2c;padding:12px;border-radius:8px;white-space:pre-wrap;">{{ d.translation.english }}</pre>
+  <div style="background:#0f1a2c;padding:12px;border-radius:8px;">
+    {{ d.translation.english | safe }}
+  </div>
 
   <h4>Transcript (Italian)</h4>
-  <pre style="background:#0f1a2c;padding:12px;border-radius:8px;white-space:pre-wrap;">{{ d.translation.italian }}</pre>
+  <div style="background:#0f1a2c;padding:12px;border-radius:8px;">
+    {{ d.translation.italian | safe }}
+  </div>
 
   <h4>Dialogue</h4>
   <ul>

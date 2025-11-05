@@ -244,33 +244,29 @@ def process_audio(file_path: Path, uuid=None):
             en_agent_lines = [translate_to_english(t, lang) for t in agent_lines]
             en_client_lines = [translate_to_english(t, lang) for t in client_lines]
 
-        en_full = "\n".join([f"Agent: {a}" for a in en_agent_lines] + [f"Client: {c}" for c in en_client_lines])
-
         # Italian translations (also per-speaker)
         it_agent_lines = [translate_en_to_it(t) for t in en_agent_lines]
         it_client_lines = [translate_en_to_it(t) for t in en_client_lines]
-        it_full = "\n".join([f"Agente: {a}" for a in it_agent_lines] + [f"Cliente: {c}" for c in it_client_lines])
 
-        # ✅ Dialogue-style transcripts (HTML formatted with bullets & bold speaker names)
+        # ✅ Properly structured HTML transcripts (render cleanly in browser)
         def format_lines(agent_lines, client_lines, lang="en"):
-            html = "<ul>"
-            for a in agent_lines:
-                if a.strip():
-                    label = "Agent" if lang == "en" else "Agente"
-                    html += f"<li><b>{label}:</b> {a.strip()}</li>"
-            for c in client_lines:
-                if c.strip():
-                    label = "Client" if lang == "en" else "Cliente"
-                    html += f"<li><b>{label}:</b> {c.strip()}</li>"
+            label_agent = "Agent" if lang == "en" else "Agente"
+            label_client = "Client" if lang == "en" else "Cliente"
+
+            html = "<ul style='margin:0;padding-left:18px;'>"
+            for line in agent_lines:
+                if line.strip():
+                    html += f"<li><b>{label_agent}:</b> {line.strip()}</li>"
+            for line in client_lines:
+                if line.strip():
+                    html += f"<li><b>{label_client}:</b> {line.strip()}</li>"
             html += "</ul>"
-            return html.strip()
+            return html
 
         translation = {
             "english": format_lines(en_agent_lines, en_client_lines, "en"),
             "italian": format_lines(it_agent_lines, it_client_lines, "it"),
         }
-
-
 
         # ✅ Improved scoring logic (based only on Agent's English)
         en_agent = " ".join(en_agent_lines)
@@ -310,8 +306,6 @@ def process_audio(file_path: Path, uuid=None):
     except Exception as e:
         print("❌ process_audio error:", e)
         return {}
-
-
 
 
 
