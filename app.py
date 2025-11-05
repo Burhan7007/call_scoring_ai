@@ -234,41 +234,50 @@ def process_audio(file_path: Path, uuid=None):
             print("⚠️ Transcript too short — regenerating from raw segments")
             combined_text = " ".join([s.text.strip() for s in raw if s.text.strip()])
 
-        # ✅ Translate each dialogue line speaker-wise (mirrors Dialogue section)
-        agent_lines = [x["text"] for x in dialogue if x["speaker"] == "Agent"]
-        client_lines = [x["text"] for x in dialogue if x["speaker"] == "Client"]
+        # ✅ Translation preserving dialogue order
+        translated_dialogue_en = []
+        translated_dialogue_it = []
 
-        if lang == "en":
-            en_agent_lines, en_client_lines = agent_lines, client_lines
-        else:
-            en_agent_lines = [translate_to_english(t, lang) for t in agent_lines]
-            en_client_lines = [translate_to_english(t, lang) for t in client_lines]
+        for d in dialogue:
+            original_text = d["text"].strip()
+            if not original_text:
+                continue
 
-        # Italian translations (also per-speaker)
-        it_agent_lines = [translate_en_to_it(t) for t in en_agent_lines]
-        it_client_lines = [translate_en_to_it(t) for t in en_client_lines]
+            # English translation (from detected lang)
+            if lang == "en":
+                en_text = original_text
+            else:
+                en_text = translate_to_english(original_text, lang)
 
-        # ✅ Properly structured HTML transcripts (render cleanly in browser)
-        def format_lines(agent_lines, client_lines, lang="en"):
+            # Italian translation (via English)
+            it_text = translate_en_to_it(en_text)
+
+            translated_dialogue_en.append({"speaker": d["speaker"], "text": en_text})
+            translated_dialogue_it.append({"speaker": d["speaker"], "text": it_text})
+
+        # ✅ Properly structured HTML transcripts (preserve natural dialogue flow)
+        def format_lines_from_dialogue(dialogue, lang="en"):
             label_agent = "Agent" if lang == "en" else "Agente"
             label_client = "Client" if lang == "en" else "Cliente"
 
             html = "<ul style='margin:0;padding-left:18px;'>"
-            for line in agent_lines:
-                if line.strip():
-                    html += f"<li><b>{label_agent}:</b> {line.strip()}</li>"
-            for line in client_lines:
-                if line.strip():
-                    html += f"<li><b>{label_client}:</b> {line.strip()}</li>"
+            for seg in dialogue:
+                speaker = seg.get("speaker", "")
+                text = seg.get("text", "").strip()
+                if not text:
+                    continue
+                label = label_agent if speaker == "Agent" else label_client if speaker == "Client" else speaker
+                html += f"<li><b>{label}:</b> {text}</li>"
             html += "</ul>"
             return html
 
         translation = {
-            "english": format_lines(en_agent_lines, en_client_lines, "en"),
-            "italian": format_lines(it_agent_lines, it_client_lines, "it"),
+            "english": format_lines_from_dialogue(translated_dialogue_en, "en"),
+            "italian": format_lines_from_dialogue(translated_dialogue_it, "it"),
         }
 
         # ✅ Improved scoring logic (based only on Agent's English)
+        en_agent_lines = [x["text"] for x in translated_dialogue_en if x["speaker"] == "Agent"]
         en_agent = " ".join(en_agent_lines)
         word_count = len(en_agent.split())
         meaningful = any(k in en_agent.lower() for k in [
@@ -306,6 +315,7 @@ def process_audio(file_path: Path, uuid=None):
     except Exception as e:
         print("❌ process_audio error:", e)
         return {}
+
 
 
 
