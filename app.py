@@ -13,9 +13,26 @@ import pandas as pd
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from werkzeug.security import generate_password_hash, check_password_hash
+from queue import Queue
+
+AUDIO_QUEUE = Queue()
+
+def audio_worker():
+    while True:
+        try:
+            fp, uuid = AUDIO_QUEUE.get()
+            print(f"🎧 Worker: starting processing for {fp.name}")
+            process_audio(fp, uuid)
+        except Exception as e:
+            print("Worker error:", e)
+        finally:
+            AUDIO_QUEUE.task_done()
+
+# Start background worker
+threading.Thread(target=audio_worker, daemon=True).start()
 
 # ==============================
-# PATHS / ENV
+# PATHS / ENV  (MUST COME FIRST)
 # ==============================
 ROOT = Path(__file__).resolve().parent
 RECORDINGS_DIR = ROOT / "recordings"
@@ -24,6 +41,18 @@ CREDS_FILE = ROOT / "admin_creds.json"
 
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ==============================
+# EMBEDDING MODEL PATH
+# ==============================
+EMBED_MODEL_PATH = MODELS_DIR / "hf" / "distiluse-base-multilingual-cased-v2"
+
+# ==============================
+# LOAD MULTILINGUAL EMBEDDING MODEL
+# ==============================
+from sentence_transformers import SentenceTransformer, util
+print("🔤 Loading embedding model for AI scoring + product detection...")
+embedder = SentenceTransformer(str(EMBED_MODEL_PATH))
 
 # ==============================
 # WHISPER
@@ -36,13 +65,25 @@ print(f"🎧 Loading Whisper model (small) [{DEVICE}, {COMPUTE}]...")
 whisper_model = WhisperModel("small", device=DEVICE, compute_type=COMPUTE)
 
 # ==============================
-# TRANSLATION MODELS
+# TRANSLATION MODELS (UPDATED)
 # ==============================
 HF_CACHE = MODELS_DIR / "hf"
 TRANSLATORS = {}
-TO_EN = {"it": "Helsinki-NLP/opus-mt-it-en", "es": "Helsinki-NLP/opus-mt-es-en", "bg": "Helsinki-NLP/opus-mt-bg-en"}
+
+TO_EN = {
+    "it": "Helsinki-NLP/opus-mt-it-en",
+    "es": "Helsinki-NLP/opus-mt-es-en",
+    "bg": "Helsinki-NLP/opus-mt-bg-en",
+    "sl": "Helsinki-NLP/opus-mt-sl-en",
+    "ro": "Helsinki-NLP/opus-mt-ro-en",
+    "pl": "Helsinki-NLP/opus-mt-pl-en",
+    "hr": "Helsinki-NLP/opus-mt-hr-en",
+    "gr": "Helsinki-NLP/opus-mt-el-en",
+}
+
 FALLBACK = "Helsinki-NLP/opus-mt-mul-en"
 EN_TO_IT = "Helsinki-NLP/opus-mt-en-it"
+
 
 def _load_translator(name):
     if name in TRANSLATORS:
@@ -53,25 +94,29 @@ def _load_translator(name):
     TRANSLATORS[name] = (tok, mdl)
     return tok, mdl
 
+
 @torch.inference_mode()
 def _translate(text, name):
     tok, mdl = _load_translator(name)
     batch = tok([text], return_tensors="pt", padding=True, truncation=True)
-    out = mdl.generate(**batch, max_new_tokens=2048)
+    out = mdl.generate(**batch, max_new_tokens=512)
     return tok.decode(out[0], skip_special_tokens=True)
 
+
 def translate_to_english(text, lang):
+    model = TO_EN.get(lang, FALLBACK)
     try:
-        model = TO_EN.get(lang, FALLBACK)
         return _translate(text, model)
     except Exception:
         return _translate(text, FALLBACK)
+
 
 def translate_en_to_it(text):
     try:
         return _translate(text, EN_TO_IT)
     except Exception:
         return text
+
 
 # ==============================
 # LANGUAGE DETECTION
@@ -190,109 +235,260 @@ def fetch_voiso(uuid):
     return {}
 
 def process_audio(file_path: Path, uuid=None):
+    from sentence_transformers import util as st_util
+
+    # -----------------------------
+    # SEMANTIC SIMILARITY
+    # -----------------------------
+    def sem_sim(a: str, b: str) -> float:
+        if not a or not b:
+            return 0
+        try:
+            e1 = embedder.encode(a, convert_to_tensor=True)
+            e2 = embedder.encode(b, convert_to_tensor=True)
+            return float(st_util.cos_sim(e1, e2)[0][0])
+        except:
+            return 0
+
+    # -----------------------------
+    # CLEANING + DEDUPE
+    # -----------------------------
+    def clean(t):
+        t = t.replace("..", ".").replace("...", ".")
+        t = " ".join(t.split())
+        return t.strip()
+
+    def dedupe(lines):
+        out, seen = [], set()
+        for l in lines:
+            if len(l) < 3:
+                continue
+            low = l.lower()
+            if low not in seen:
+                seen.add(low)
+                out.append(l)
+        return out
+
     print(f"🎧 Transcribing {file_path.name}")
+
     try:
-        # Pass 1: Transcribe with VAD filter for cleaner segmentation
-        segments, info = whisper_model.transcribe(str(file_path), vad_filter=True, beam_size=5)
+        # ----------------------------------------------------
+        # 1. TRANSCRIBE
+        # ----------------------------------------------------
+        segments, info = whisper_model.transcribe(
+            str(file_path), vad_filter=True, beam_size=5
+        )
         raw = [s for s in segments if s.text.strip()]
         txt = " ".join([s.text.strip() for s in raw])
 
-        # Pass 2 fallback: retry without VAD if too short or repetitive
-        if len(txt.split()) < 15 or len(set(txt.split())) < 5:
-            print("⚠️ Fallback pass — reprocessing without VAD (to capture missed speech)")
-            segments, info = whisper_model.transcribe(str(file_path), vad_filter=False, beam_size=5)
+        # retry without VAD
+        if len(txt.split()) < 15:
+            print("⚠ Weak transcription → no-VAD retry")
+            segments, info = whisper_model.transcribe(
+                str(file_path), vad_filter=False, beam_size=5
+            )
             raw = [s for s in segments if s.text.strip()]
             txt = " ".join([s.text.strip() for s in raw])
 
-        # Improved diarization (Agent/Client alternation)
+        blank_call = len(txt.split()) < 5
+
+        # ----------------------------------------------------
+        # 2. DIARIZATION
+        # ----------------------------------------------------
         dialogue = diarize(raw)
 
-        # Fallback: alternate if only one speaker detected
         if len({d["speaker"] for d in dialogue}) < 2:
-            print("⚠️ Diarization fallback — alternating Agent/Client")
             dialogue = []
             cur = "Agent"
-            for idx, seg in enumerate(raw):
+            for i, seg in enumerate(raw):
                 dialogue.append({
                     "speaker": cur,
                     "text": seg.text.strip(),
                     "start": seg.start,
                     "end": seg.end
                 })
-                if idx % 2 == 1:
+                if i % 2 == 1:
                     cur = "Client" if cur == "Agent" else "Agent"
 
-        # Detect language (Whisper or phone prefix)
-        lang = (info.language or "").lower() or "en"
+        total_duration = raw[-1].end if raw else 0
+        spoken = sum(d["end"] - d["start"] for d in dialogue)
+        dialogue_score = (
+            int(min(100, (spoken / total_duration)*100))
+            if total_duration else 0
+        )
+
+        # ----------------------------------------------------
+        # 3. LANGUAGE DETECTION
+        # ----------------------------------------------------
         cdr = fetch_voiso(uuid) if uuid else {}
-        if lang == "unknown" or not lang:
+
+        lang = (info.language or "").lower().strip()
+        if lang in ("", "unknown"):
             lang = detect_language_from_country(cdr.get("to") or cdr.get("from"))
 
-        # Build clean text for fallback scoring
-        combined_text = " ".join([d["text"] for d in dialogue if d.get("text")]).strip()
+        if lang.startswith("sl"): lang = "sl"
+        if lang.startswith(("hr", "bs", "sr")): lang = "hr"
+        if lang.startswith("el"): lang = "gr"
+
+        # ----------------------------------------------------
+        # 4. PREP TEXT
+        # ----------------------------------------------------
+        agent_lines = [d["text"] for d in dialogue if d["speaker"] == "Agent"]
+        client_lines = [d["text"] for d in dialogue if d["speaker"] == "Client"]
+
+        combined_text = " ".join(agent_lines + client_lines)
         if len(combined_text.split()) < 20:
-            print("⚠️ Transcript too short — regenerating from raw segments")
-            combined_text = " ".join([s.text.strip() for s in raw if s.text.strip()])
+            combined_text = txt
 
-        # ✅ Translation preserving dialogue order
-        translated_dialogue_en = []
-        translated_dialogue_it = []
+        # -----------------------------
+        # 5. TRANSLATION — MATCH EXACT SPEAKER ORDER + BULLET FORMAT
+        # -----------------------------
+        en_lines = []
+        it_lines = []
 
-        for d in dialogue:
-            original_text = d["text"].strip()
-            if not original_text:
-                continue
+        for turn in dialogue:
+            sp = turn["speaker"]
+            orig = clean(turn["text"])
 
-            # English translation (from detected lang)
+            # English translation
             if lang == "en":
-                en_text = original_text
+                en_t = orig
             else:
-                en_text = translate_to_english(original_text, lang)
+                en_t = clean(translate_to_english(orig, lang))
 
-            # Italian translation (via English)
-            it_text = translate_en_to_it(en_text)
+            # Italian translation
+            it_t = clean(translate_en_to_it(en_t))
 
-            translated_dialogue_en.append({"speaker": d["speaker"], "text": en_text})
-            translated_dialogue_it.append({"speaker": d["speaker"], "text": it_text})
+            # Bullet formatted like dialogue
+            bullet = f"- {sp}: {en_t}"
+            en_lines.append(bullet)
 
-        # ✅ Properly structured HTML transcripts (preserve natural dialogue flow)
-        def format_lines_from_dialogue(dialogue, lang="en"):
-            label_agent = "Agent" if lang == "en" else "Agente"
-            label_client = "Client" if lang == "en" else "Cliente"
+            bullet_it = f"- {'Agente' if sp == 'Agent' else 'Cliente'}: {it_t}"
+            it_lines.append(bullet_it)
 
-            html = "<ul style='margin:0;padding-left:18px;'>"
-            for seg in dialogue:
-                speaker = seg.get("speaker", "")
-                text = seg.get("text", "").strip()
-                if not text:
-                    continue
-                label = label_agent if speaker == "Agent" else label_client if speaker == "Client" else speaker
-                html += f"<li><b>{label}:</b> {text}</li>"
-            html += "</ul>"
-            return html
+        # For scoring (agent-only lines, clean text)
+        en_agent = [line.replace("- Agent: ", "") for line in en_lines if line.startswith("- Agent:")]
+        en_client = [line.replace("- Client: ", "") for line in en_lines if line.startswith("- Client:")]
 
-        translation = {
-            "english": format_lines_from_dialogue(translated_dialogue_en, "en"),
-            "italian": format_lines_from_dialogue(translated_dialogue_it, "it"),
+        combined_en = " ".join(en_agent + en_client).lower()
+
+
+
+        # ----------------------------------------------------
+        # 6. KPI SCORING  (Semantic + Keyword Backup)
+        # ----------------------------------------------------
+        kpi_desc = {
+            "Greeting": "agent greets politely with hello or good morning",
+            "Introduction": "agent introduces themselves with their name",
+            "Company Presentation": "agent explains the company they represent",
+            "Product Mention": "agent describes the product or order",
+            "Upsell Product": "agent offers extra product or upgrade",
+            "Insurance Upsell": "agent offers warranty or guarantee",
+            "Address Confirmation": "agent confirms the delivery address",
+            "Recap": "agent summarizes the order before finishing the call",
+            "Tone of Voice": "agent speaks politely and thanks the customer",
         }
 
-        # ✅ Improved scoring logic (based only on Agent's English)
-        en_agent_lines = [x["text"] for x in translated_dialogue_en if x["speaker"] == "Agent"]
-        en_agent = " ".join(en_agent_lines)
-        word_count = len(en_agent.split())
-        meaningful = any(k in en_agent.lower() for k in [
-            "hello", "thank", "confirm", "product", "address", "please", "order",
-            "good morning", "afternoon", "call", "customer", "service"
-        ])
+        ai_score = 0
+        missing = []
 
-        if word_count < 20:
-            total, missing, comment = 0, [], "Low-content or very short call (under 20 words)"
-        elif not meaningful and word_count < 40:
-            total, missing, comment = 0, [], "Likely non-meaningful / background noise"
+        SIM_THR = 0.18
+        chunks = en_agent  # ENGLISH agent-only lines
+
+        for kpi, desc in kpi_desc.items():
+            best = max((sem_sim(c, desc) for c in chunks), default=0)
+            if best >= SIM_THR:
+                ai_score += 10
+            else:
+                missing.append(kpi)
+
+        # keyword fallback
+        fallback = {
+            "Greeting": ["hello", "good morning", "hi"],
+            "Introduction": ["my name", "this is"],
+            "Company Presentation": ["calling from", "company"],
+            "Product Mention": ["product", "order", "package"],
+            "Upsell Product": ["extra", "upgrade"],
+            "Insurance Upsell": ["warranty", "guarantee"],
+            "Address Confirmation": ["street", "address", "postcode"],
+            "Recap": ["confirm", "summary"],
+            "Tone of Voice": ["thank you", "thanks"],
+        }
+
+        for kpi, words in fallback.items():
+            if kpi in missing and any(w in combined_en for w in words):
+                ai_score += 10
+                missing.remove(kpi)
+
+        if blank_call:
+            ai_score = 0
+            missing = list(kpi_desc.keys())
+            comment = "Blank or noise-only call"
         else:
-            total, missing, comment = score_text(en_agent)
+            comment = "Good call!" if not missing else f"Missing: {', '.join(missing)}"
 
-        # Final structured result
+
+        # ----------------------------------------------------
+        # 7. ORDER STATUS (MULTI-PATTERN SEMANTIC DETECTION)
+        # ----------------------------------------------------
+        order_status = "unknown"
+
+        accept_patterns = [
+            "i confirm", "i accept", "yes i confirm", "i agree",
+            "send it", "ok send", "i will receive", "i want it",
+            "proceed with the order", "yes the order"
+        ]
+
+        refuse_patterns = [
+            "i don't want", "i refuse", "cancel the order",
+            "not interested", "stop the order", "i won't take it",
+            "i do not want", "no i don't want"
+        ]
+
+        recall_patterns = [
+            "call me later", "call later", "later please",
+            "not now", "try again later", "call back later"
+        ]
+
+        def match_any(text, patterns, th=0.22):
+            return any(sem_sim(text, p) > th for p in patterns)
+
+        if match_any(combined_en, accept_patterns):
+            order_status = "accepted"
+        elif match_any(combined_en, refuse_patterns):
+            order_status = "refused"
+        elif match_any(combined_en, recall_patterns):
+            order_status = "recall"
+
+
+
+        # ----------------------------------------------------
+        # 8. REJECTION REASON
+        # ----------------------------------------------------
+        rejection_reason = None
+
+        if order_status == "refused":
+            reasons = {
+                "cancelled": "customer confirms but later cancels",
+                "fake": "customer says they never ordered anything",
+                "error": "wrong number or wrong customer",
+                "objection": "customer refuses because of price or distrust",
+            }
+
+            best_score = 0
+            best_label = None
+
+            for label, desc in reasons.items():
+                s = sem_sim(combined_en, desc)
+                if s > best_score:
+                    best_score = s
+                    best_label = label
+
+            rejection_reason = best_label
+
+        # ----------------------------------------------------
+        # 9. BUILD JSON RESULT
+        # ----------------------------------------------------
         res = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "agent_name": cdr.get("agent", "Unknown"),
@@ -300,22 +496,41 @@ def process_audio(file_path: Path, uuid=None):
             "duration": cdr.get("duration", "N/A"),
             "call_status": cdr.get("disposition", "Unknown"),
             "language_detected": lang,
-            "translation": translation,
+
+            "translation_score": 0,
+            "dialogue_score": dialogue_score,
+
+            "order_status": order_status,
+            "rejection_reason": rejection_reason,
+            "blank_call": blank_call,
+
+            # PERFECT Speaker-ordered bullet point transcription
+            "translation": {
+                "english": "\n".join(en_lines),
+                "italian": "\n".join(it_lines),
+            },
+
             "dialogue": dialogue,
-            "scoring": {"total": total, "missing": missing, "comment": comment},
+
+            "scoring": {
+                "total": ai_score,
+                "missing": missing,
+                "comment": comment,
+            },
         }
 
-        # Save output JSON
+        # Save JSON
         tmp = file_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.rename(file_path.with_suffix(".json"))
+
         print(f"✅ Saved {file_path.stem}.json")
         return res
+
 
     except Exception as e:
         print("❌ process_audio error:", e)
         return {}
-
 
 
 
@@ -400,7 +615,14 @@ def home():
     phone_q = (request.args.get("phone") or "").strip()
     agent_q = (request.args.get("agent") or "").strip().lower()
     lang_q = (request.args.get("lang") or "").strip().lower()
-    status_q = (request.args.get("status") or "answered").strip().lower()
+    status_q = (request.args.get("status") or "").strip().lower()
+
+
+    # ORDER STATUS FILTER — now no default ("show all")
+    order_status_q = (request.args.get("order_status") or "").strip().lower()
+
+    # REJECTION FILTER — optional
+    rejection_q = (request.args.get("rejection") or "").strip().lower()
 
     all_rows, items = [], []
 
@@ -408,10 +630,22 @@ def home():
         try:
             d = json.loads(f.read_text(encoding="utf-8"))
             d["_id"] = f.stem.replace("call_", "")
+
+            # existing safe defaults
             d["agent_name"] = d.get("agent_name") or "Unknown"
             d["language_detected"] = d.get("language_detected") or "Unknown"
             d["call_status"] = d.get("call_status") or "Unknown"
             d["duration_display"] = str(d.get("duration", "N/A"))
+
+            # NEW: order status + rejection (for display + normalized for filtering)
+            order_status_val = (d.get("order_status") or "").strip()
+            rejection_val = (d.get("rejection_reason") or "").strip()
+
+            d["order_status"] = order_status_val or "-"          # for template display
+            d["rejection_reason"] = rejection_val or "-"         # for template display
+            d["_order_status_norm"] = order_status_val.lower()
+            d["_rejection_norm"] = rejection_val.lower()
+
             all_rows.append(d)
         except Exception as e:
             print("⚠️ Error reading file:", f.name, e)
@@ -421,8 +655,19 @@ def home():
     statuses = sorted({r["call_status"] for r in all_rows})
 
     for r in all_rows:
+        # Call status filter
         if status_q and r.get("call_status", "").lower() != status_q:
             continue
+
+        # NEW: order status filter
+        if order_status_q and r.get("_order_status_norm", "") != order_status_q:
+            continue
+
+        # NEW: rejection reason filter
+        if rejection_q and r.get("_rejection_norm", "") != rejection_q:
+            continue
+
+        # existing filters
         if agent_q and agent_q not in r.get("agent_name", "").lower():
             continue
         if lang_q and lang_q != r.get("language_detected", "").lower():
@@ -431,10 +676,20 @@ def home():
             continue
         if q and q not in (r.get("translation", {}).get("english", "").lower()):
             continue
+
         items.append(r)
 
     items = sorted(items, key=lambda x: x.get("timestamp", ""), reverse=True)
-    return render_template("index.html", items=items, agents=agents, langs=langs, statuses=statuses)
+    return render_template(
+        "index.html",
+        items=items,
+        agents=agents,
+        langs=langs,
+        statuses=statuses,
+    )
+
+
+
 
 @app.route("/call/<cid>")
 @login_required
@@ -454,12 +709,20 @@ def export_csv():
             valid.append(json.loads(f.read_text(encoding="utf-8")))
         except:
             pass
+
     if not valid:
         abort(404)
+
+    # ensure new fields exist
+    for row in valid:
+        row["order_status"] = row.get("order_status", "")
+        row["rejection_reason"] = row.get("rejection_reason", "")
+
     df = pd.json_normalize(valid)
     out = RECORDINGS_DIR / "export.csv"
     df.to_csv(out, index=False)
     return send_file(out, as_attachment=True)
+
 
 @app.route("/report/<cid>.pdf")
 @login_required
@@ -467,8 +730,10 @@ def report_pdf(cid):
     jf = RECORDINGS_DIR / f"call_{cid}.json"
     if not jf.exists():
         abort(404)
+
     d = json.loads(jf.read_text(encoding="utf-8"))
     out = RECORDINGS_DIR / f"report_{cid}.pdf"
+
     c = canvas.Canvas(str(out), pagesize=A4)
     w, h = A4
     y = h - 40
@@ -480,45 +745,110 @@ def report_pdf(cid):
 
     c.setFont("Helvetica-Bold", 14)
     line(f"Call Report — {cid}", 22)
+
     c.setFont("Helvetica", 11)
     line(f"Agent: {d.get('agent_name')} | Customer: {d.get('customer_phone')}")
     line(f"Language: {d.get('language_detected')} | Duration: {d.get('duration')} | Status: {d.get('call_status')}")
+
+    # NEW FIELDS
+    line(f"Order Status: {d.get('order_status', '-')}")
+    line(f"Rejection: {d.get('rejection_reason', '-')}")
+
     s = d.get("scoring", {})
-    line(f"Score: {s.get('total',0)} / 100")
+    line(f"Score: {s.get('total', 0)} / 100")
     miss = s.get("missing") or []
     if miss:
         line("Missing KPIs: " + ", ".join(miss))
+
     line("")
     line("Transcript (EN):", 18)
+
     for chunk in (d.get("translation", {}).get("english", "")).split("\n"):
         line(chunk)
         if y < 80:
             c.showPage()
             y = h - 40
             c.setFont("Helvetica", 11)
+
     c.showPage()
     c.save()
     return send_file(out, as_attachment=True)
 
+
 @app.route("/voiso-webhook", methods=["POST"])
 def voiso_webhook():
     try:
-        payload = request.get_json(force=True)
-        call = payload.get("data", payload)
-        call_id = call.get("uuid") or call.get("id") or datetime.utcnow().strftime("%Y%m%d%H%M%S")
-        url = call.get("recording") or call.get("recording_url")
+        payload = request.get_json(silent=True) or {}
+        print("📥 Incoming webhook payload:", payload)
+
+        call = (
+            payload.get("data")
+            or payload.get("payload")
+            or payload
+        )
+
+        if not isinstance(call, dict):
+            return jsonify({"status": "error", "msg": "invalid call data"}), 200
+
+        call_id = (
+            call.get("uuid")
+            or call.get("id")
+            or datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        )
+
+        # 1. DIRECT RECORDING URL (most reliable)
+        url = (
+            call.get("recording")
+            or call.get("recording_url")
+            or call.get("audio")
+            or call.get("file")
+        )
+
+        # 2. IF MISSING → TRY CDR QUIETLY
         if not url:
-            return jsonify({"status": "error", "msg": "no recording"}), 400
+            cdr_url = call.get("cdr_url")
+            if cdr_url:
+                try:
+                    print("🔄 Fetching CDR...")
+                    cdr_raw = requests.get(cdr_url, timeout=10)
+                    if cdr_raw.status_code == 200:
+                        cdr_json = cdr_raw.json()
+                        url = (
+                            cdr_json.get("recording")
+                            or cdr_json.get("recording_url")
+                            or cdr_json.get("audio")
+                            or cdr_json.get("file")
+                        )
+                except Exception as e:
+                    print("❌ CDR fetch failed (ignored):", e)
+
+        # 3. IF STILL NO URL → ACCEPT WEBHOOK BUT DO NOTHING
+        if not url:
+            print("❌ No recording URL available (ignored).")
+            return jsonify({"status": "ok", "id": call_id}), 200
+
+        # 4. DOWNLOAD RECORDING
         dest_audio = RECORDINGS_DIR / f"call_{call_id}.mp3"
-        print(f"⬇️ Downloading {url} → {dest_audio.name}")
-        r = requests.get(url, timeout=60)
-        r.raise_for_status()
-        dest_audio.write_bytes(r.content)
-        threading.Thread(target=process_audio, args=(dest_audio, call_id), daemon=True).start()
+        print(f"⬇️ Downloading audio → {dest_audio.name}")
+
+        try:
+            r = requests.get(url, timeout=60)
+            r.raise_for_status()
+            dest_audio.write_bytes(r.content)
+        except Exception as e:
+            print("❌ Download failed:", url, e)
+            return jsonify({"status": "ok", "id": call_id}), 200
+
+        # 5. QUEUE FOR AI PROCESSING
+        AUDIO_QUEUE.put((dest_audio, call_id))
+        print(f"📌 Queued for processing: {dest_audio.name}")
+
         return jsonify({"status": "ok", "id": call_id}), 200
+
     except Exception as e:
         print("❌ Webhook error:", e)
-        return jsonify({"status": "error", "msg": str(e)}), 500
+        return jsonify({"status": "ok"}), 200
+
 
 # ==============================
 # RUN

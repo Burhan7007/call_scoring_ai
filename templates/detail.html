@@ -2,12 +2,15 @@
 {% block content %}
 <div style="padding:20px 30px">
   <h2>📞 Call ID: {{ cid }}</h2>
+
   <div style="color:#9bb1d3;margin-bottom:15px;">
     <b>Agent:</b> {{ d.agent_name }} &nbsp;|&nbsp;
     <b>Customer:</b> {{ d.customer_phone }} &nbsp;|&nbsp;
     <b>Language:</b> {{ d.language_detected }} &nbsp;|&nbsp;
     <b>Duration:</b> {{ d.duration }} &nbsp;|&nbsp;
-    <b>Status:</b> {{ d.call_status }}
+    <b>Status:</b> {{ d.call_status }} &nbsp;|&nbsp;
+    <b>Order Status:</b> {{ d.order_status or "-" }} &nbsp;|&nbsp;
+    <b>Rejection:</b> {{ d.rejection_reason or "-" }}
   </div>
 
   <h4>Score: {{ d.scoring.total }} / 100</h4>
@@ -18,14 +21,34 @@
   {% endif %}
 
   <h4>Transcript (English)</h4>
-  <div style="background:#0f1a2c;padding:12px;border-radius:8px;">
-    {{ d.translation.english | safe }}
+  <div class="transcript-block">
+    {% for line in d.translation.english.split('\n') %}
+        {% if line.startswith("Agent:") %}
+            <p><b>Agent:</b> {{ line[6:].strip() }}</p>
+        {% elif line.startswith("Client:") %}
+            <p><b>Client:</b> {{ line[7:].strip() }}</p>
+        {% else %}
+            <p>{{ line }}</p>
+        {% endif %}
+    {% endfor %}
   </div>
 
+
+
   <h4>Transcript (Italian)</h4>
-  <div style="background:#0f1a2c;padding:12px;border-radius:8px;">
-    {{ d.translation.italian | safe }}
+  <div class="transcript-block">
+    {% for line in d.translation.italian.split('\n') %}
+        {% if line.startswith("Agente:") %}
+            <p><b>Agente:</b> {{ line[7:].strip() }}</p>
+        {% elif line.startswith("Cliente:") %}
+            <p><b>Cliente:</b> {{ line[8:].strip() }}</p>
+        {% else %}
+            <p>{{ line }}</p>
+        {% endif %}
+    {% endfor %}
   </div>
+
+
 
   <h4>Dialogue</h4>
   <ul>

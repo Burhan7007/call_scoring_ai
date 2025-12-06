@@ -2,9 +2,15 @@
 {% block content %}
 <div class="filters" style="padding:16px 22px;">
   <form method="get" style="display:flex;gap:10px;flex-wrap:wrap;">
-    <input name="q" value="{{ request.args.get('q','') }}" placeholder="Search transcript (EN)..." style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
-    <input name="phone" value="{{ request.args.get('phone','') }}" placeholder="Customer phone..." style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
-    
+
+    <!-- Search -->
+    <input name="q" value="{{ request.args.get('q','') }}" placeholder="Search transcript (EN)..."
+           style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
+
+    <input name="phone" value="{{ request.args.get('phone','') }}" placeholder="Customer phone..."
+           style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
+
+    <!-- Agent Filter -->
     <select name="agent" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
       <option value="">All Agents</option>
       {% for a in agents %}
@@ -12,6 +18,7 @@
       {% endfor %}
     </select>
 
+    <!-- Language Filter -->
     <select name="lang" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
       <option value="">All Languages</option>
       {% for l in langs %}
@@ -19,14 +26,33 @@
       {% endfor %}
     </select>
 
+    <!-- Call Status Filter -->
     <select name="status" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
-      <option value="">All Statuses</option>
+      <option value="">All Call Status</option>
       {% for s in statuses %}
         <option value="{{ s }}" {% if request.args.get('status','')==s %}selected{% endif %}>{{ s }}</option>
       {% endfor %}
     </select>
 
-    <button class="btn" type="submit" style="padding:6px 14px;background:#2563eb;color:white;border:none;border-radius:6px;cursor:pointer;">
+    <!-- NEW: Order Status Filter -->
+    <select name="order_status" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
+      <option value="">All Order Status</option>
+      <option value="accepted"   {% if request.args.get('order_status')=='accepted' %}selected{% endif %}>Order Accepted</option>
+      <option value="refused"    {% if request.args.get('order_status')=='refused' %}selected{% endif %}>Order Refused</option>
+      <option value="recall"     {% if request.args.get('order_status')=='recall' %}selected{% endif %}>To Recall</option>
+    </select>
+
+    <!-- NEW: Rejection Reason Filter -->
+    <select name="rejection" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
+      <option value="">All Rejection Types</option>
+      <option value="cancelled"  {% if request.args.get('rejection')=='cancelled' %}selected{% endif %}>Cancelled in Call</option>
+      <option value="fake"       {% if request.args.get('rejection')=='fake' %}selected{% endif %}>Fake Lead</option>
+      <option value="error"      {% if request.args.get('rejection')=='error' %}selected{% endif %}>Error in Data</option>
+      <option value="objection"  {% if request.args.get('rejection')=='objection' %}selected{% endif %}>Commercial Objection</option>
+    </select>
+
+    <button class="btn" type="submit"
+            style="padding:6px 14px;background:#2563eb;color:white;border:none;border-radius:6px;cursor:pointer;">
       Filter
     </button>
   </form>
@@ -40,6 +66,7 @@
       <th style="padding:10px 8px;">Language</th>
       <th style="padding:10px 8px;">Duration</th>
       <th style="padding:10px 8px;">Status</th>
+      <th style="padding:10px 8px;">Order Status</th>
       <th style="padding:10px 8px;">Score</th>
       <th style="padding:10px 8px;">Actions</th>
     </tr>
@@ -53,7 +80,12 @@
         <td style="padding:8px 8px;">{{ item.language_detected }}</td>
         <td style="padding:8px 8px;">{{ item.duration_display }}</td>
         <td style="padding:8px 8px;">{{ item.call_status }}</td>
+
+        <!-- NEW FIELDS -->
+        <td style="padding:8px 8px;">{{ item.order_status or "-" }}</td>
+
         <td style="padding:8px 8px;">{{ item.scoring.total }}</td>
+
         <td style="padding:8px 8px;">
           <a href="{{ url_for('detail', cid=item._id) }}" style="color:#60a5fa;">View</a> |
           <a href="{{ url_for('report_pdf', cid=item._id) }}" style="color:#34d399;">PDF</a>
@@ -63,7 +95,7 @@
 
     {% if items|length == 0 %}
       <tr>
-        <td colspan="7" style="color:#9fb3d9;text-align:center;padding:14px;">
+        <td colspan="9" style="color:#9fb3d9;text-align:center;padding:14px;">
           No results found.
         </td>
       </tr>
