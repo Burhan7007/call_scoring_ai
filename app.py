@@ -162,25 +162,38 @@ def score_text(english_text: str):
 def diarize(raw, pause=1.0, max_agent_run=4):
     """
     Improved diarization:
-    - Alternates Agent/Client based on silence or repetition.
-    - Forces speaker switch after a few turns if one side talks too long.
+    - Prevents repetition artifacts from Whisper.
+    - Splits long repeated segments.
+    - Alternates agent/client cleanly.
     """
     dialogue, buf, cur, start, last, run_len = [], [], "Agent", 0.0, 0.0, 0
 
+    def clean_repetition(t):
+        # Remove repeated tokens like "no no no no no..."
+        words = t.split()
+        cleaned = []
+        last_word = ""
+        for w in words:
+            if w.lower() != last_word:
+                cleaned.append(w)
+            last_word = w.lower()
+        return " ".join(cleaned)
+
     def flush(b, s, st, en):
-        if b:
-            text = " ".join(b).strip()
-            if text:
-                dialogue.append({"speaker": s, "text": text, "start": st, "end": en})
+        if not b:
+            return
+        text = clean_repetition(" ".join(b).strip())
+        if text:
+            dialogue.append({"speaker": s, "text": text, "start": st, "end": en})
 
     for seg in raw:
         gap = seg.start - last
-        duration = seg.end - seg.start
 
-        # Switch speaker if silence or repetition indicates turn-taking
-        if gap >= pause or run_len >= max_agent_run or len(buf) > 4 and seg.text.strip().endswith("?"):
+        # switch speaker if long pause or too many sentences
+        if gap >= pause or run_len >= max_agent_run:
             flush(buf, cur, start, last)
-            buf, start = [], seg.start
+            buf = []
+            start = seg.start
             cur = "Client" if cur == "Agent" else "Agent"
             run_len = 0
 
@@ -341,7 +354,7 @@ def process_audio(file_path: Path, uuid=None):
             combined_text = txt
 
         # -----------------------------
-        # 5. TRANSLATION — MATCH EXACT SPEAKER ORDER + BULLET FORMAT
+        # 5. TRANSLATION — PERFECT MATCH + BULLETS
         # -----------------------------
         en_lines = []
         it_lines = []
@@ -359,19 +372,15 @@ def process_audio(file_path: Path, uuid=None):
             # Italian translation
             it_t = clean(translate_en_to_it(en_t))
 
-            # Bullet formatted like dialogue
-            bullet = f"- {sp}: {en_t}"
-            en_lines.append(bullet)
+            # Bullet format, identical to dialogue structure
+            en_lines.append(f"- {sp}: {en_t}")
+            it_lines.append(f"- {'Agente' if sp == 'Agent' else 'Cliente'}: {it_t}")
 
-            bullet_it = f"- {'Agente' if sp == 'Agent' else 'Cliente'}: {it_t}"
-            it_lines.append(bullet_it)
-
-        # For scoring (agent-only lines, clean text)
-        en_agent = [line.replace("- Agent: ", "") for line in en_lines if line.startswith("- Agent:")]
-        en_client = [line.replace("- Client: ", "") for line in en_lines if line.startswith("- Client:")]
+        # scoring-only English lines
+        en_agent = [l.replace("- Agent: ", "") for l in en_lines if l.startswith("- Agent:")]
+        en_client = [l.replace("- Client: ", "") for l in en_lines if l.startswith("- Client:")]
 
         combined_en = " ".join(en_agent + en_client).lower()
-
 
 
         # ----------------------------------------------------
@@ -429,36 +438,57 @@ def process_audio(file_path: Path, uuid=None):
 
 
         # ----------------------------------------------------
-        # 7. ORDER STATUS (MULTI-PATTERN SEMANTIC DETECTION)
+        # 7. ORDER STATUS (FIXED + MULTI-PATTERN SEMANTIC DETECTION)
         # ----------------------------------------------------
         order_status = "unknown"
 
-        accept_patterns = [
-            "i confirm", "i accept", "yes i confirm", "i agree",
-            "send it", "ok send", "i will receive", "i want it",
-            "proceed with the order", "yes the order"
-        ]
+        # Special-case: call disposition already tells us there was NO conversation
+        disp = (cdr.get("disposition") or "").lower()
 
-        refuse_patterns = [
-            "i don't want", "i refuse", "cancel the order",
-            "not interested", "stop the order", "i won't take it",
-            "i do not want", "no i don't want"
-        ]
+        no_talk = (dialogue_score < 5) or (len(en_agent) + len(en_client) == 0)
 
-        recall_patterns = [
-            "call me later", "call later", "later please",
-            "not now", "try again later", "call back later"
-        ]
-
-        def match_any(text, patterns, th=0.22):
-            return any(sem_sim(text, p) > th for p in patterns)
-
-        if match_any(combined_en, accept_patterns):
-            order_status = "accepted"
-        elif match_any(combined_en, refuse_patterns):
-            order_status = "refused"
-        elif match_any(combined_en, recall_patterns):
+        # --------- ABSOLUTE RULES (no talk → recall) ----------
+        if no_talk:
             order_status = "recall"
+
+        elif "abandon" in disp or "abandoned" in disp:
+            order_status = "recall"
+
+        elif disp in ["failed", "no answer", "busy"]:
+            order_status = "recall"
+
+        else:
+            # --------- NORMAL SEMANTIC CLASSIFICATION ----------
+            accept_patterns = [
+                "i confirm", "i accept", "yes i confirm", "i agree",
+                "send it", "ok send", "i will receive", "i want it",
+                "proceed with the order", "yes the order", "yes i want the order",
+                "i confirm the order"
+            ]
+
+            refuse_patterns = [
+                "i don't want", "i refuse", "cancel the order",
+                "not interested", "stop the order", "i won't take it",
+                "i do not want", "no i don't want", "i don't need it",
+                "i don't want the order", "i refuse the order"
+            ]
+
+            recall_patterns = [
+                "call me later", "call later", "later please",
+                "not now", "try again later", "call back later",
+                "call tomorrow", "contact me later"
+            ]
+
+            def match_any(text, patterns, th=0.22):
+                return any(sem_sim(text, p) > th for p in patterns)
+
+            if match_any(combined_en, accept_patterns):
+                order_status = "accepted"
+            elif match_any(combined_en, refuse_patterns):
+                order_status = "refused"
+            elif match_any(combined_en, recall_patterns):
+                order_status = "recall"
+
 
 
 
@@ -487,31 +517,37 @@ def process_audio(file_path: Path, uuid=None):
             rejection_reason = best_label
 
         # ----------------------------------------------------
-        # 9. BUILD JSON RESULT
+        # 9. BUILD JSON RESULT (CLEAN + CONSISTENT + SAFE)
         # ----------------------------------------------------
         res = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
+
+            # CDR Metadata (safe fallback)
             "agent_name": cdr.get("agent", "Unknown"),
             "customer_phone": cdr.get("to") or cdr.get("from", "Unknown"),
             "duration": cdr.get("duration", "N/A"),
             "call_status": cdr.get("disposition", "Unknown"),
             "language_detected": lang,
 
+            # Scores
             "translation_score": 0,
             "dialogue_score": dialogue_score,
 
+            # Order logic
             "order_status": order_status,
-            "rejection_reason": rejection_reason,
+            "rejection_reason": rejection_reason or "-",
             "blank_call": blank_call,
 
-            # PERFECT Speaker-ordered bullet point transcription
+            # Bullet-point translations (exact speaker order)
             "translation": {
-                "english": "\n".join(en_lines),
-                "italian": "\n".join(it_lines),
+                "english": "\n".join(en_lines) if en_lines else "-",
+                "italian": "\n".join(it_lines) if it_lines else "-",
             },
 
+            # Raw diarized dialogue (for backend tools)
             "dialogue": dialogue,
 
+            # KPI scoring
             "scoring": {
                 "total": ai_score,
                 "missing": missing,
@@ -519,18 +555,17 @@ def process_audio(file_path: Path, uuid=None):
             },
         }
 
-        # Save JSON
+        # Save JSON safely
         tmp = file_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(
+            json.dumps(res, ensure_ascii=False, indent=2),
+            encoding="utf-8"
+        )
         tmp.rename(file_path.with_suffix(".json"))
 
         print(f"✅ Saved {file_path.stem}.json")
         return res
 
-
-    except Exception as e:
-        print("❌ process_audio error:", e)
-        return {}
 
 
 
