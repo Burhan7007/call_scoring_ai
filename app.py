@@ -264,7 +264,7 @@ def process_audio(file_path: Path, uuid=None):
             return 0
 
     # -----------------------------
-    # CLEANING + DEDUPE
+    # CLEAN / DEDUPE
     # -----------------------------
     def clean(t):
         t = t.replace("..", ".").replace("...", ".")
@@ -288,18 +288,14 @@ def process_audio(file_path: Path, uuid=None):
         # ----------------------------------------------------
         # 1. TRANSCRIBE
         # ----------------------------------------------------
-        segments, info = whisper_model.transcribe(
-            str(file_path), vad_filter=True, beam_size=5
-        )
+        segments, info = whisper_model.transcribe(str(file_path), vad_filter=True, beam_size=5)
         raw = [s for s in segments if s.text.strip()]
         txt = " ".join([s.text.strip() for s in raw])
 
-        # retry without VAD
+        # retry without VAD if too short
         if len(txt.split()) < 15:
-            print("⚠ Weak transcription → no-VAD retry")
-            segments, info = whisper_model.transcribe(
-                str(file_path), vad_filter=False, beam_size=5
-            )
+            print("⚠ Weak transcription → retrying without VAD")
+            segments, info = whisper_model.transcribe(str(file_path), vad_filter=False, beam_size=5)
             raw = [s for s in segments if s.text.strip()]
             txt = " ".join([s.text.strip() for s in raw])
 
@@ -310,6 +306,7 @@ def process_audio(file_path: Path, uuid=None):
         # ----------------------------------------------------
         dialogue = diarize(raw)
 
+        # fallback diarization if only one speaker detected
         if len({d["speaker"] for d in dialogue}) < 2:
             dialogue = []
             cur = "Agent"
@@ -323,12 +320,10 @@ def process_audio(file_path: Path, uuid=None):
                 if i % 2 == 1:
                     cur = "Client" if cur == "Agent" else "Agent"
 
+        # dialogue score = talking time
         total_duration = raw[-1].end if raw else 0
         spoken = sum(d["end"] - d["start"] for d in dialogue)
-        dialogue_score = (
-            int(min(100, (spoken / total_duration)*100))
-            if total_duration else 0
-        )
+        dialogue_score = int(min(100, (spoken / total_duration) * 100)) if total_duration else 0
 
         # ----------------------------------------------------
         # 3. LANGUAGE DETECTION
@@ -353,9 +348,9 @@ def process_audio(file_path: Path, uuid=None):
         if len(combined_text.split()) < 20:
             combined_text = txt
 
-        # -----------------------------
-        # 5. TRANSLATION — PERFECT MATCH + BULLETS
-        # -----------------------------
+        # ----------------------------------------------------
+        # 5. TRANSLATION — BULLET FORMAT
+        # ----------------------------------------------------
         en_lines = []
         it_lines = []
 
@@ -372,19 +367,15 @@ def process_audio(file_path: Path, uuid=None):
             # Italian translation
             it_t = clean(translate_en_to_it(en_t))
 
-            # Bullet format, identical to dialogue structure
             en_lines.append(f"- {sp}: {en_t}")
             it_lines.append(f"- {'Agente' if sp == 'Agent' else 'Cliente'}: {it_t}")
 
-        # scoring-only English lines
         en_agent = [l.replace("- Agent: ", "") for l in en_lines if l.startswith("- Agent:")]
         en_client = [l.replace("- Client: ", "") for l in en_lines if l.startswith("- Client:")]
-
         combined_en = " ".join(en_agent + en_client).lower()
 
-
         # ----------------------------------------------------
-        # 6. KPI SCORING  (Semantic + Keyword Backup)
+        # 6. KPI SCORING
         # ----------------------------------------------------
         kpi_desc = {
             "Greeting": "agent greets politely with hello or good morning",
@@ -398,11 +389,9 @@ def process_audio(file_path: Path, uuid=None):
             "Tone of Voice": "agent speaks politely and thanks the customer",
         }
 
-        ai_score = 0
-        missing = []
-
+        ai_score, missing = 0, []
         SIM_THR = 0.18
-        chunks = en_agent  # ENGLISH agent-only lines
+        chunks = en_agent
 
         for kpi, desc in kpi_desc.items():
             best = max((sem_sim(c, desc) for c in chunks), default=0)
@@ -411,7 +400,7 @@ def process_audio(file_path: Path, uuid=None):
             else:
                 missing.append(kpi)
 
-        # keyword fallback
+        # keyword backup
         fallback = {
             "Greeting": ["hello", "good morning", "hi"],
             "Introduction": ["my name", "this is"],
@@ -429,54 +418,46 @@ def process_audio(file_path: Path, uuid=None):
                 ai_score += 10
                 missing.remove(kpi)
 
+        comment = "Blank or noise-only call" if blank_call else \
+            ("Good call!" if not missing else f"Missing: {', '.join(missing)}")
+
         if blank_call:
             ai_score = 0
             missing = list(kpi_desc.keys())
-            comment = "Blank or noise-only call"
-        else:
-            comment = "Good call!" if not missing else f"Missing: {', '.join(missing)}"
-
 
         # ----------------------------------------------------
-        # 7. ORDER STATUS (FIXED + MULTI-PATTERN SEMANTIC DETECTION)
+        # 7. ORDER STATUS (FIXED)
         # ----------------------------------------------------
         order_status = "unknown"
-
-        # Special-case: call disposition already tells us there was NO conversation
         disp = (cdr.get("disposition") or "").lower()
 
         no_talk = (dialogue_score < 5) or (len(en_agent) + len(en_client) == 0)
 
-        # --------- ABSOLUTE RULES (no talk → recall) ----------
         if no_talk:
             order_status = "recall"
 
-        elif "abandon" in disp or "abandoned" in disp:
+        elif any(x in disp for x in ["abandon", "abandoned"]):
             order_status = "recall"
 
         elif disp in ["failed", "no answer", "busy"]:
             order_status = "recall"
 
         else:
-            # --------- NORMAL SEMANTIC CLASSIFICATION ----------
             accept_patterns = [
                 "i confirm", "i accept", "yes i confirm", "i agree",
                 "send it", "ok send", "i will receive", "i want it",
-                "proceed with the order", "yes the order", "yes i want the order",
-                "i confirm the order"
+                "proceed with the order", "yes the order"
             ]
 
             refuse_patterns = [
                 "i don't want", "i refuse", "cancel the order",
                 "not interested", "stop the order", "i won't take it",
-                "i do not want", "no i don't want", "i don't need it",
-                "i don't want the order", "i refuse the order"
+                "i do not want", "no i don't want"
             ]
 
             recall_patterns = [
                 "call me later", "call later", "later please",
-                "not now", "try again later", "call back later",
-                "call tomorrow", "contact me later"
+                "not now", "try again later", "call back later"
             ]
 
             def match_any(text, patterns, th=0.22):
@@ -489,14 +470,10 @@ def process_audio(file_path: Path, uuid=None):
             elif match_any(combined_en, recall_patterns):
                 order_status = "recall"
 
-
-
-
         # ----------------------------------------------------
         # 8. REJECTION REASON
         # ----------------------------------------------------
         rejection_reason = None
-
         if order_status == "refused":
             reasons = {
                 "cancelled": "customer confirms but later cancels",
@@ -505,9 +482,7 @@ def process_audio(file_path: Path, uuid=None):
                 "objection": "customer refuses because of price or distrust",
             }
 
-            best_score = 0
-            best_label = None
-
+            best_score, best_label = 0, None
             for label, desc in reasons.items():
                 s = sem_sim(combined_en, desc)
                 if s > best_score:
@@ -517,37 +492,25 @@ def process_audio(file_path: Path, uuid=None):
             rejection_reason = best_label
 
         # ----------------------------------------------------
-        # 9. BUILD JSON RESULT (CLEAN + CONSISTENT + SAFE)
+        # 9. BUILD JSON RESULT
         # ----------------------------------------------------
         res = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
-
-            # CDR Metadata (safe fallback)
             "agent_name": cdr.get("agent", "Unknown"),
             "customer_phone": cdr.get("to") or cdr.get("from", "Unknown"),
             "duration": cdr.get("duration", "N/A"),
             "call_status": cdr.get("disposition", "Unknown"),
             "language_detected": lang,
-
-            # Scores
             "translation_score": 0,
             "dialogue_score": dialogue_score,
-
-            # Order logic
             "order_status": order_status,
             "rejection_reason": rejection_reason or "-",
             "blank_call": blank_call,
-
-            # Bullet-point translations (exact speaker order)
             "translation": {
                 "english": "\n".join(en_lines) if en_lines else "-",
                 "italian": "\n".join(it_lines) if it_lines else "-",
             },
-
-            # Raw diarized dialogue (for backend tools)
             "dialogue": dialogue,
-
-            # KPI scoring
             "scoring": {
                 "total": ai_score,
                 "missing": missing,
@@ -555,16 +518,16 @@ def process_audio(file_path: Path, uuid=None):
             },
         }
 
-        # Save JSON safely
         tmp = file_path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(res, ensure_ascii=False, indent=2),
-            encoding="utf-8"
-        )
+        tmp.write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.rename(file_path.with_suffix(".json"))
 
         print(f"✅ Saved {file_path.stem}.json")
         return res
+
+    except Exception as e:
+        print("❌ process_audio error:", e)
+        return {}
 
 
 
