@@ -1200,9 +1200,6 @@ def score_text(english_text: str):
 def process_audio(file_path: Path, uuid=None):
     from sentence_transformers import util as st_util
 
-    # -----------------------------
-    # helper: semantic similarity
-    # -----------------------------
     def sem_sim(a: str, b: str) -> float:
         if not a or not b:
             return 0
@@ -1214,8 +1211,8 @@ def process_audio(file_path: Path, uuid=None):
             return 0
 
     def clean(t):
-        t = t.replace("..", ".").replace("...", ".")
-        return " ".join(t.split()).strip()
+        t = " ".join(t.replace("..", ".").replace("...", ".").split())
+        return t.strip()
 
     print(f"🎧 Transcribing {file_path.name}")
 
@@ -1227,7 +1224,7 @@ def process_audio(file_path: Path, uuid=None):
         raw = [s for s in segments if s.text.strip()]
         txt = " ".join([s.text.strip() for s in raw])
 
-        # retry without VAD if too short
+        # Retry without VAD if weak
         if len(txt.split()) < 12:
             print("⚠ Weak transcription → retrying without VAD")
             segments, info = whisper_model.transcribe(str(file_path), vad_filter=False, beam_size=5)
@@ -1241,8 +1238,8 @@ def process_audio(file_path: Path, uuid=None):
         # ----------------------------------------------------
         dialogue = diarize(raw)
 
-        # fallback diarization
         if len({d["speaker"] for d in dialogue}) < 2:
+            # fallback diarization
             dialogue = []
             cur = "Agent"
             for i, seg in enumerate(raw):
@@ -1250,11 +1247,12 @@ def process_audio(file_path: Path, uuid=None):
                     "speaker": cur,
                     "text": seg.text.strip(),
                     "start": seg.start,
-                    "end": seg.end
+                    "end": seg.end,
                 })
                 if i % 2 == 1:
                     cur = "Client" if cur == "Agent" else "Agent"
 
+        # dialogue score
         total_duration = raw[-1].end if raw else 0
         spoken = sum(d["end"] - d["start"] for d in dialogue)
         dialogue_score = int(min(100, (spoken / total_duration) * 100)) if total_duration else 0
@@ -1263,11 +1261,12 @@ def process_audio(file_path: Path, uuid=None):
         # 3. CDR + LANGUAGE
         # ----------------------------------------------------
         cdr = fetch_voiso(uuid) if uuid else {}
-
         lang = (info.language or "").lower().strip()
+
         if lang in ("", "unknown"):
             lang = detect_language_from_country(cdr.get("to") or cdr.get("from"))
 
+        # normalize
         if lang.startswith("sl"): lang = "sl"
         if lang.startswith(("hr", "bs", "sr")): lang = "hr"
         if lang.startswith("el"): lang = "gr"
@@ -1285,131 +1284,126 @@ def process_audio(file_path: Path, uuid=None):
         # ----------------------------------------------------
         # 5. TRANSLATION
         # ----------------------------------------------------
-        en_lines = []
-        it_lines = []
+        en_lines, it_lines = [], []
 
         for turn in dialogue:
             sp = turn["speaker"]
             orig = clean(turn["text"])
 
-            if lang == "en":
-                en_t = orig
-            else:
-                en_t = clean(translate_to_english(orig, lang))
-
+            en_t = orig if lang == "en" else clean(translate_to_english(orig, lang))
             it_t = clean(translate_en_to_it(en_t))
 
             en_lines.append(f"- {sp}: {en_t}")
             it_lines.append(f"- {'Agente' if sp == 'Agent' else 'Cliente'}: {it_t}")
 
-        combined_en = " ".join([
-            l.replace("- Agent: ", "") for l in en_lines if l.startswith("- Agent:")
-        ] + [
-            l.replace("- Client: ", "") for l in en_lines if l.startswith("- Client:")
-        ]).lower()
+        en_agent = [l.replace("- Agent: ", "") for l in en_lines if l.startswith("- Agent:")]
+        en_client = [l.replace("- Client: ", "") for l in en_lines if l.startswith("- Client:")]
+
+        combined_en = " ".join(en_agent + en_client).lower()
 
         total_words = len(combined_en.split())
-        agent_spoke = len([l for l in en_lines if "Agent:" in l]) > 0
-        client_spoke = len([l for l in en_lines if "Client:" in l]) > 0
+        agent_spoke = len(en_agent) > 0
+        client_spoke = len(en_client) > 0
         both_spoke = agent_spoke and client_spoke
 
         # ----------------------------------------------------
-        # 6. KPI SCORE (AI-driven)
+        # 6. KPI SCORING (balanced)
         # ----------------------------------------------------
         score_val, missing, comment = score_text(combined_en)
 
         # ----------------------------------------------------
-        # 7. ORDER STATUS — FIXED & STRICT
+        # 7. ORDER STATUS (correct, balanced)
         # ----------------------------------------------------
         disp = (cdr.get("disposition") or "").lower()
 
-        bad_dispositions = [
-            "abandon", "abandoned", "failed", "busy", "no answer",
-            "dialer_abandoned", "dialer_failed"
-        ]
+        bad_dispos = ["abandon", "abandoned", "failed", "busy", "no answer", "dialer_abandoned"]
 
-        # hard rule: if customer NEVER spoke → not accepted
-        if not client_spoke:
-            no_dialogue = True
-        else:
-            no_dialogue = (
-                blank_call
-                or dialogue_score < 20
-                or total_words < 10
-                or not both_spoke
-            )
+        # hard rejection for acceptance
+        no_talk = (
+            blank_call
+            or not client_spoke
+            or total_words < 8
+            or dialogue_score < 12
+            or not both_spoke
+        )
 
-        # CASE 1 → no speech / drop → always recall
-        if no_dialogue:
+        if no_talk:
             order_status = "recall"
 
-        # CASE 2 → system drop dispositions
-        elif any(x in disp for x in bad_dispositions):
+        elif any(x in disp for x in bad_dispos):
             order_status = "recall"
 
         else:
-            # AI-based text classification
-            accept_patterns = [
-                "i confirm", "i accept", "yes i confirm", "i agree", "ok send it",
-                "proceed with the order", "i want it", "i will take it",
-                "yes the order", "i approve the order"
+            # NEW BALANCED AI LOGIC
+            strong_accept = [
+                "i confirm", "i accept", "yes i confirm", "i agree",
+                "i approve", "send the order", "i want it", "i will take it",
+                "yes send it", "i will receive"
             ]
 
-            refuse_patterns = [
-                "i don't want", "i refuse", "cancel the order", "not interested",
-                "stop the order", "i won't take it", "i do not want",
-                "no i don't want", "no i will not take it"
+            medium_accept = [
+                "ok thanks", "sounds good", "perfect", "fine for me",
+                "alright", "okay i think", "yes it's fine"
             ]
 
-            recall_patterns = [
-                "call me later", "call later", "later please", "not now",
-                "try again later", "call back later"
+            strong_refuse = [
+                "i don't want", "i refuse", "cancel the order",
+                "not interested", "stop the order",
+                "i won't take it", "no i don't want"
             ]
 
-            def match_any(text, patterns, th=0.25):
-                return any(sem_sim(text, p) >= th for p in patterns)
+            recall_phrases = [
+                "call me later", "call later", "later please",
+                "not now", "try again later", "call back later"
+            ]
 
-            if match_any(combined_en, accept_patterns):
-                if both_spoke and total_words >= 25 and dialogue_score >= 30:
+            def match(text, phrases, th=0.23):
+                return any(sem_sim(text, p) >= th for p in phrases)
+
+            # STRONG ACCEPT → always accept if minimal conditions met
+            if match(combined_en, strong_accept):
+                order_status = "accepted"
+
+            # MEDIUM ACCEPT → accept only if product context exists
+            elif match(combined_en, medium_accept):
+                product_present = sem_sim(combined_en, "product description or order details") > 0.25
+                if product_present:
                     order_status = "accepted"
                 else:
                     order_status = "recall"
 
-            elif match_any(combined_en, refuse_patterns):
-                if both_spoke and total_words >= 15:
-                    order_status = "refused"
-                else:
-                    order_status = "recall"
+            elif match(combined_en, strong_refuse):
+                order_status = "refused"
 
-            elif match_any(combined_en, recall_patterns):
+            elif match(combined_en, recall_phrases):
                 order_status = "recall"
 
             else:
                 order_status = "recall"
 
         # ----------------------------------------------------
-        # 8. REJECTION REASONS (Milestone 2)
+        # 8. REJECTION REASON
         # ----------------------------------------------------
         rejection_reason = "-"
         if order_status == "refused":
             reasons = {
-                "cancelled": "customer confirmed but later cancelled the order",
-                "fake": "customer says they never placed any order",
-                "error": "wrong person or wrong number",
+                "cancelled": "customer confirms but then cancels",
+                "fake": "customer says they never ordered",
+                "error": "wrong number or wrong data",
                 "objection": "customer refuses due to price or distrust",
             }
 
-            best_score, best_label = 0, "-"
+            best, best_label = 0, "-"
             for label, desc in reasons.items():
                 s = sem_sim(combined_en, desc)
-                if s > best_score:
-                    best_score = s
+                if s > best:
+                    best = s
                     best_label = label
 
             rejection_reason = best_label
 
         # ----------------------------------------------------
-        # 9. SAVE OUTPUT
+        # 9. SAVE
         # ----------------------------------------------------
         res = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -1444,6 +1438,7 @@ def process_audio(file_path: Path, uuid=None):
     except Exception as e:
         print("❌ process_audio error:", e)
         return {}
+
 
 
 # ============================================================
