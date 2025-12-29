@@ -1,16 +1,15 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="filters" style="padding:16px 22px;">
-  <form method="get" style="display:flex;gap:10px;flex-wrap:wrap;">
 
-    <!-- Search -->
+<div class="filters" style="padding:16px 22px;">
+  <form method="get" style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;">
+
     <input name="q" value="{{ request.args.get('q','') }}" placeholder="Search transcript (EN)..."
-           style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
+           style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;min-width:240px;">
 
     <input name="phone" value="{{ request.args.get('phone','') }}" placeholder="Customer phone..."
-           style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
+           style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;min-width:180px;">
 
-    <!-- Agent Filter -->
     <select name="agent" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
       <option value="">All Agents</option>
       {% for a in agents %}
@@ -18,7 +17,6 @@
       {% endfor %}
     </select>
 
-    <!-- Language Filter -->
     <select name="lang" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
       <option value="">All Languages</option>
       {% for l in langs %}
@@ -26,7 +24,6 @@
       {% endfor %}
     </select>
 
-    <!-- Call Status Filter -->
     <select name="status" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
       <option value="">All Call Status</option>
       {% for s in statuses %}
@@ -34,21 +31,19 @@
       {% endfor %}
     </select>
 
-    <!-- NEW: Order Status Filter -->
     <select name="order_status" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
       <option value="">All Order Status</option>
-      <option value="accepted"   {% if request.args.get('order_status')=='accepted' %}selected{% endif %}>Order Accepted</option>
-      <option value="refused"    {% if request.args.get('order_status')=='refused' %}selected{% endif %}>Order Refused</option>
-      <option value="recall"     {% if request.args.get('order_status')=='recall' %}selected{% endif %}>To Recall</option>
+      <option value="accepted" {% if request.args.get('order_status')=='accepted' %}selected{% endif %}>Order Accepted</option>
+      <option value="refused"  {% if request.args.get('order_status')=='refused' %}selected{% endif %}>Order Refused</option>
+      <option value="recall"   {% if request.args.get('order_status')=='recall' %}selected{% endif %}>To Recall</option>
     </select>
 
-    <!-- NEW: Rejection Reason Filter -->
     <select name="rejection" style="padding:6px 8px;border-radius:6px;border:1px solid #334155;background:#0f172a;color:#e2e8f0;">
       <option value="">All Rejection Types</option>
-      <option value="cancelled"  {% if request.args.get('rejection')=='cancelled' %}selected{% endif %}>Cancelled in Call</option>
-      <option value="fake"       {% if request.args.get('rejection')=='fake' %}selected{% endif %}>Fake Lead</option>
-      <option value="error"      {% if request.args.get('rejection')=='error' %}selected{% endif %}>Error in Data</option>
-      <option value="objection"  {% if request.args.get('rejection')=='objection' %}selected{% endif %}>Commercial Objection</option>
+      <option value="cancelled" {% if request.args.get('rejection')=='cancelled' %}selected{% endif %}>Cancelled in Call</option>
+      <option value="fake"      {% if request.args.get('rejection')=='fake' %}selected{% endif %}>Fake Lead</option>
+      <option value="error"     {% if request.args.get('rejection')=='error' %}selected{% endif %}>Error in Data</option>
+      <option value="objection" {% if request.args.get('rejection')=='objection' %}selected{% endif %}>Commercial Objection</option>
     </select>
 
     <button class="btn" type="submit"
@@ -67,7 +62,7 @@
       <th style="padding:10px 8px;">Duration</th>
       <th style="padding:10px 8px;">Status</th>
       <th style="padding:10px 8px;">Order Status</th>
-      <th style="padding:10px 8px;">Score</th>
+      <th style="padding:10px 8px;">KPI Score</th>
       <th style="padding:10px 8px;">Actions</th>
     </tr>
   </thead>
@@ -81,10 +76,20 @@
         <td style="padding:8px 8px;">{{ item.duration_display }}</td>
         <td style="padding:8px 8px;">{{ item.call_status }}</td>
 
-        <!-- NEW FIELDS -->
-        <td style="padding:8px 8px;">{{ item.order_status or "-" }}</td>
+        <td style="padding:8px 8px;">
+          {% set os = (item.order_status or "-") %}
+          {% if os == "accepted" %}
+            <span style="padding:3px 8px;border-radius:999px;background:#064e3b;color:#a7f3d0;font-size:12px;">Accepted</span>
+          {% elif os == "refused" %}
+            <span style="padding:3px 8px;border-radius:999px;background:#7f1d1d;color:#fecaca;font-size:12px;">Refused</span>
+          {% elif os == "recall" %}
+            <span style="padding:3px 8px;border-radius:999px;background:#1e3a8a;color:#bfdbfe;font-size:12px;">Recall</span>
+          {% else %}
+            <span style="color:#94a3b8;">-</span>
+          {% endif %}
+        </td>
 
-        <td style="padding:8px 8px;">{{ item.scoring.total }}</td>
+        <td style="padding:8px 8px;">{{ item.scoring.total if item.scoring else "-" }}</td>
 
         <td style="padding:8px 8px;">
           <a href="{{ url_for('detail', cid=item._id) }}" style="color:#60a5fa;">View</a> |
@@ -95,11 +100,12 @@
 
     {% if items|length == 0 %}
       <tr>
-        <td colspan="9" style="color:#9fb3d9;text-align:center;padding:14px;">
+        <td colspan="8" style="color:#9fb3d9;text-align:center;padding:14px;">
           No results found.
         </td>
       </tr>
     {% endif %}
   </tbody>
 </table>
+
 {% endblock %}
