@@ -1198,7 +1198,6 @@ def voiso_webhook():
         print("❌ Webhook error:", e)
         return jsonify({"status": "ok"}), 200
 
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=False)
 
-# ==============================
-# RUN
-app.run(host="0.0.0.0", port=5000, debug=False)
