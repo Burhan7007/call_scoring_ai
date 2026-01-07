@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html class='login-html'>
+<head>
+<title>Callcenter</title>
+<link rel="stylesheet" href="/_front/application.css" />
+<meta name="csrf-param" content="authenticity_token" />
+<meta name="csrf-token" content="J_SHW87_mF-kUpVAGwKU55_9c24sps_gN9nDFX33Dm3kJqC6NwAdS9VXZKTCwx316JEvPxu5Hhqv6otwPzmdhw" />
+<meta content='width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no' name='viewport'>
+<meta content='#595f76' name='theme-color'>
+<meta content='#595f76' name='theme-color'>
+<meta content='#333333' name='msapplication-TileColor'>
+<meta content='yes' name='mobile-web-app-capable'>
+<meta content='#595f76' name='apple-mobile-web-app-status-bar-style'>
+<meta content='Voiso' name='apple-mobile-web-app-title'>
+<meta content='website' name='og:type'>
+<meta content='noindex, nofollow' name='robots'>
+<link rel="icon" type="image/x-icon" href="/favicon.svg" />
+</head>
+<body class='auth'>
+<div class='alert_container'>
+</div>
+<div class='login-gradient'>
+<div class='triangle'></div>
+<div class='info-block'></div>
+</div>
+<div class='box'>
+<form class="new_user" id="new_user" action="/users/sign_in" accept-charset="UTF-8" method="post"><input type="hidden" name="authenticity_token" value="vl82UkDJBFRmduJHmigLo6v8iU6NqEJ83O3vMFMvrF99jRGzuTaBQBdzE6ND6YKx3JDVH7q3k4ZE3qdVEeE_tQ" autocomplete="off" /><div class='login-title'>Sign in</div>
+<div class='field'>
+<div class='field__label'>Login</div>
+<input autofocus="autofocus" class="login-input" type="email" value="" name="user[email]" id="user_email" />
+</div>
+<div class='field'>
+<div class='field__label'>Password</div>
+<input autocomplete="off" class="password-input" type="password" name="user[password]" id="user_password" />
+</div>
+
+
+<div class='actions'>
+<input type="submit" name="commit" value="Sign in" class="btn btn-success" data-disable-with="Sign in" />
+</div>
+<div class='google-sign-in'>
+<script async src='https://accounts.google.com/gsi/client'></script>
+<div data-authenticity_token='Vk0ZFSDrvo74tio2ZX3U4otgPJ8QzNoKz4Gs1HWvUeuVnz702RQ7momz29K8vF3w_AxgzifTC_BXsuSxN2HCAQ' data-auto_prompt='true' data-client_id='1021383517478-nkffm92r7gkv42oaf4vailu4rsjim82r.apps.googleusercontent.com' data-login_uri='https://cc-rtm01.voiso.com/google_sign_in_callback' id='g_id_onload'></div>
+<div class='g_id_signin'></div>
+</div>
+<button id='custom-google-btn' role='button'>
+<svg fill='none' height='28' width='29' xmlns='http://www.w3.org/2000/svg'>
+<g clip-path='url(#a)'>
+<path d='M28.166 14.262c0-1.147-.093-1.984-.294-2.853h-13.1v5.178h7.69c-.155 1.287-.993 3.225-2.853 4.527l-.026.173 4.142 3.209.287.028c2.635-2.434 4.154-6.015 4.154-10.262' fill='#4285F4'></path>
+<path d='M14.772 27.904c3.767 0 6.93-1.24 9.24-3.38l-4.403-3.41c-1.178.821-2.76 1.395-4.837 1.395-3.69 0-6.82-2.434-7.937-5.798l-.163.014-4.307 3.333-.056.157c2.294 4.557 7.007 7.689 12.463 7.689' fill='#34A853'></path>
+<path d='M6.835 16.711a8.6 8.6 0 0 1-.465-2.76c0-.96.17-1.89.45-2.758l-.008-.185-4.36-3.387-.144.068A14 14 0 0 0 .82 13.952c0 2.248.543 4.371 1.488 6.263z' fill='#FBBC05'></path>
+<path d='M14.772 5.395c2.62 0 4.387 1.131 5.395 2.077l3.938-3.845C21.686 1.38 18.539 0 14.772 0 9.316 0 4.602 3.131 2.31 7.689l4.51 3.504c1.132-3.364 4.264-5.798 7.953-5.798' fill='#EB4335'></path>
+</g>
+<defs>
+<clipPath id='a'>
+<path d='M.5 0h28v28H.5z' fill='#fff'></path>
+</clipPath>
+</defs>
+</svg>
+<span>
+Sign in with Google
+</span>
+</button>
+</form><script>
+document.addEventListener("DOMContentLoaded", () => {
+  const googleBtn = document.getElementById('custom-google-btn');
+
+  if (googleBtn) {
+    googleBtn.addEventListener('click', (event) => {
+    event.preventDefault()
+    const googleSignInBtn = document.querySelector('.g_id_signin div[role=button]');
+
+    if (googleSignInBtn) googleSignInBtn.click()
+    });
+  }
+});
+</script>
+
+</div>
+</body>
+</html>

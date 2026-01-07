@@ -110,6 +110,8 @@ COMPUTE = "float16" if USE_GPU else "int8"
 
 print(f"🎧 Loading Whisper model (small) [{DEVICE}, {COMPUTE}]...")
 whisper_model = WhisperModel("small", device=DEVICE, compute_type=COMPUTE)
+whisper_model_medium = WhisperModel("medium", device=DEVICE, compute_type=COMPUTE)
+
 
 # ==============================
 # TRANSLATION MODELS (UPDATED)
@@ -142,12 +144,23 @@ def _load_translator(name):
     return tok, mdl
 
 
+
 @torch.inference_mode()
 def _translate(text, name):
     tok, mdl = _load_translator(name)
     batch = tok([text], return_tensors="pt", padding=True, truncation=True)
-    out = mdl.generate(**batch, max_new_tokens=512)
+
+    out = mdl.generate(
+        **batch,
+        max_new_tokens=256,
+        num_beams=3,
+        no_repeat_ngram_size=3,
+        repetition_penalty=1.15,
+        length_penalty=1.0,
+        early_stopping=True,
+    )
     return tok.decode(out[0], skip_special_tokens=True)
+
 
 
 def translate_to_english(text, lang):
@@ -231,28 +244,57 @@ def diarize(raw, pause=1.0, max_agent_run=4):
     """
     dialogue, buf, cur, start, last, run_len = [], [], "Agent", 0.0, 0.0, 0
 
-    def clean_repetition(t):
-        # Remove repeated tokens like "no no no no no..."
-        words = t.split()
+    def clean_repetition(text: str) -> str:
+        """
+        Removes heavy repetition artifacts like:
+        'no no no no...' OR repeated short phrases.
+        Keeps normal speech intact.
+        """
+        words = text.split()
+        if len(words) < 8:
+            return text
+
+        # 1) collapse long runs of same word
         cleaned = []
-        last_word = ""
+        last = None
+        run = 0
         for w in words:
-            if w.lower() != last_word:
-                cleaned.append(w)
-            last_word = w.lower()
-        return " ".join(cleaned)
+            wl = w.lower()
+            if wl == last:
+                run += 1
+                # allow max 2 repeats
+                if run >= 2:
+                    continue
+            else:
+                run = 0
+            cleaned.append(w)
+            last = wl
+
+        # 2) remove repeated 2-gram loops (like "no no", "yes yes")
+        out = []
+        i = 0
+        while i < len(cleaned):
+            if i + 3 < len(cleaned):
+                a = (cleaned[i].lower(), cleaned[i+1].lower())
+                b = (cleaned[i+2].lower(), cleaned[i+3].lower())
+                if a == b and a[0] in {"no", "yes", "ok", "okay"}:
+                    # skip one repeated pair
+                    out.extend(cleaned[i:i+2])
+                    i += 4
+                    continue
+            out.append(cleaned[i])
+            i += 1
+
+        return " ".join(out)
 
     def flush(b, s, st, en):
         if not b:
             return
         text = " ".join(b).strip()
-
-        # Only do light repetition cleanup for AGENT, never for CLIENT
-        if s == "Agent":
-            text = clean_repetition(text)
-
+        text = clean_repetition(text)
         if text:
             dialogue.append({"speaker": s, "text": text, "start": st, "end": en})
+
 
     for seg in raw:
         gap = seg.start - last
@@ -638,6 +680,13 @@ def detect_product_ai(combined_en: str, thr: float = 0.30):
         "product_confidence": round(best, 4),
     }
 
+def text_has_any(t: str, phrases: list[str]) -> bool:
+    t = (t or "").lower()
+    return any(p in t for p in phrases)
+
+def match_any_sem(text: str, patterns: list[str], th: float = 0.25) -> bool:
+    return any(cosine_sim(text, p) >= th for p in patterns)
+
 
 
 def process_audio(file_path: Path, uuid=None):
@@ -649,15 +698,38 @@ def process_audio(file_path: Path, uuid=None):
 
     try:
         # ----------------------------------------------------
-        # 1) TRANSCRIBE
+        # 1) TRANSCRIBE  (WITH QUALITY RETRY + GREEK BOOST)
         # ----------------------------------------------------
         segments, info = whisper_model.transcribe(str(file_path), vad_filter=True, beam_size=5)
         raw = [s for s in segments if (s.text or "").strip()]
         txt = " ".join([s.text.strip() for s in raw])
 
-        if len(txt.split()) < 12:
-            print("⚠ Weak transcription → retrying without VAD")
-            segments, info = whisper_model.transcribe(str(file_path), vad_filter=False, beam_size=5)
+        # ---- helpers ----
+        def looks_hallucinated(t: str) -> bool:
+            ws = (t or "").lower().split()
+            if len(ws) < 8:
+                return True
+            uniq_ratio = len(set(ws)) / max(1, len(ws))
+            return uniq_ratio < 0.25
+
+        lang_guess = (info.language or "").lower().strip()
+
+        # Retry conditions:
+        need_retry = (
+            len(txt.split()) < 12
+            or looks_hallucinated(txt)
+            or lang_guess in ("el", "gr")
+        )
+
+        if need_retry:
+            print("⚠ Quality retry transcription...")
+            # If greek, try medium (recommended)
+            # NOTE: you must define whisper_model_medium globally (see below)
+            if lang_guess in ("el", "gr"):
+                segments, info = whisper_model_medium.transcribe(str(file_path), vad_filter=True, beam_size=5)
+            else:
+                segments, info = whisper_model.transcribe(str(file_path), vad_filter=False, beam_size=5)
+
             raw = [s for s in segments if (s.text or "").strip()]
             txt = " ".join([s.text.strip() for s in raw])
 
@@ -774,43 +846,45 @@ def process_audio(file_path: Path, uuid=None):
         call_score = compute_call_score(total_words, dialogue_score, both_spoke, blank_call)
 
         # ----------------------------------------------------
-        # 7) ORDER STATUS (STRICT + AI)
+        # 7) ORDER STATUS (CLIENT-INTENT FIRST)
         # ----------------------------------------------------
         disp = (cdr.get("disposition") or "").lower()
-        bad_dispositions = ["abandon", "abandoned", "failed", "busy", "no answer", "dialer_abandoned", "dialer_failed", "system_abandoned"]
+        bad_disp = ["abandon", "abandoned", "failed", "busy", "no answer", "dialer_abandoned", "system_abandoned"]
+
+        client_en_only = clean(" ".join(client_en_texts)).lower()
+        agent_en_only  = clean(" ".join(agent_en_texts)).lower()
 
         # hard rules
-        if blank_call or (not client_spoke) or (not both_spoke) or dialogue_score < 10:
+        if blank_call or not client_spoke or dialogue_score < 10:
             order_status = "recall"
-        elif any(x in disp for x in bad_dispositions):
+        elif any(x in disp for x in bad_disp):
             order_status = "recall"
         else:
             accept_patterns = [
-                "i confirm", "i accept", "yes i confirm", "i agree",
-                "ok send it", "send it", "i will receive", "i will take it",
-                "proceed with the order", "i want it", "i approve the order"
+                "i confirm", "i accept", "yes i confirm", "yes", "ok", "okay",
+                "send it", "proceed", "i will receive", "i will take it",
+                "i confirm the order", "i confirm address", "i agree"
             ]
             refuse_patterns = [
-                "i don't want", "i refuse", "cancel the order", "not interested",
-                "stop the order", "i won't take it", "i do not want"
+                "i don't want", "not interested", "cancel", "stop", "refuse",
+                "i will not take it", "no i don't want"
             ]
             recall_patterns = [
-                "call me later", "call later", "later please", "not now",
-                "try again later", "call back later"
+                "call later", "later", "not now", "call back", "tomorrow"
             ]
 
-            def match_any(text, patterns, th=0.25):
-                return any(cosine_sim(text, p) >= th for p in patterns)
-
-            if match_any(combined_en, accept_patterns):
-                # require decent call quality
-                order_status = "accepted" if (call_score >= 45 and total_words >= 20) else "recall"
-            elif match_any(combined_en, refuse_patterns):
-                order_status = "refused" if (call_score >= 35 and total_words >= 12) else "recall"
-            elif match_any(combined_en, recall_patterns):
+            # priority: CUSTOMER intent
+            if match_any_sem(client_en_only, accept_patterns, th=0.23) or text_has_any(client_en_only, ["i confirm", "i accept", "i agree", "send it"]):
+                order_status = "accepted"
+            elif match_any_sem(client_en_only, refuse_patterns, th=0.23) or text_has_any(client_en_only, ["not interested", "cancel", "refuse"]):
+                order_status = "refused"
+            elif match_any_sem(client_en_only, recall_patterns, th=0.23) or text_has_any(client_en_only, ["call later", "not now", "tomorrow"]):
                 order_status = "recall"
             else:
+                # if client didn't express intent, use call quality
+                # long+both spoke → assume recall rather than wrong accept/refuse
                 order_status = "recall"
+
 
         # ----------------------------------------------------
         # 8) REJECTION REASONS (Milestone 2 feature, keep simple)
