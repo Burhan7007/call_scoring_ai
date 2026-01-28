@@ -16,6 +16,9 @@ def _cache_put(cache: dict, key, val):
         cache.pop(next(iter(cache)))
     cache[key] = val
 
+
+
+
 # ==============================
 # TRANSLATION MODELS EXTENSION
 # ==============================
@@ -64,6 +67,10 @@ CREDS_FILE = ROOT / "admin_creds.json"
 
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
+MISTRAL_REMOTE_URL = os.environ.get("https://martin-petite-shot-festivals.trycloudflare.com", "").strip()  # e.g. https://xxxx.ngrok-free.app
+MISTRAL_SECRET = os.environ.get("CHANGE_ME_TO_A_LONG_RANDOM_SECRET", "").strip()
+ENABLE_REMOTE_LLM = bool(MISTRAL_REMOTE_URL and MISTRAL_SECRET)
 
 # ==============================
 # EMBEDDING MODEL PATH
@@ -687,48 +694,129 @@ def text_has_any(t: str, phrases: list[str]) -> bool:
 def match_any_sem(text: str, patterns: list[str], th: float = 0.25) -> bool:
     return any(cosine_sim(text, p) >= th for p in patterns)
 
+def call_mistral_remote(payload: dict, timeout=10):
+    if not ENABLE_REMOTE_LLM:
+        return None
+    try:
+        r = requests.post(
+            f"{MISTRAL_REMOTE_URL}/infer",
+            json=payload,
+            headers={"X-Auth": MISTRAL_SECRET},
+            timeout=timeout
+        )
+        if r.status_code != 200:
+            return None
+        return r.json()
+    except Exception as e:
+        print("⚠️ remote mistral failed:", e)
+        return None
+
 
 
 def process_audio(file_path: Path, uuid=None):
+    """
+    Full updated process_audio:
+    - Local pipeline stays same (download -> whisper -> diarize -> translate -> score -> save JSON)
+    - ORDER STATUS is ALWAYS decided by remote Mistral (Colab) if available
+    - If remote fails, fallback strict local rules are used
+    - Saves debug info inside JSON so detail page can show which method was used
+      -> res["llm"]["order_status"]["method"] = "mistral" | "fallback"
+    """
     print(f"🎧 Transcribing {file_path.name}")
 
-    def clean(t):
+    def clean(t: str) -> str:
         t = (t or "").replace("..", ".").replace("...", ".")
         return " ".join(t.split()).strip()
 
+    def clean_repetition_heavy(text: str) -> str:
+        text = (text or "").strip()
+        if not text:
+            return text
+        words = text.split()
+        if len(words) < 10:
+            return text
+
+        from collections import Counter
+        c = Counter([w.lower() for w in words])
+        _, most_cnt = c.most_common(1)[0]
+
+        # if one word dominates too much -> likely loop
+        if (most_cnt / max(1, len(words))) < 0.35:
+            return text
+
+        out, last, rep = [], None, 0
+        for w in words:
+            wl = w.lower()
+            if wl == last:
+                rep += 1
+                if rep >= 2:
+                    continue
+            else:
+                rep = 0
+            out.append(w)
+            last = wl
+        return " ".join(out)
+
+    def looks_hallucinated(t: str) -> bool:
+        ws = (t or "").lower().split()
+        if len(ws) < 8:
+            return True
+        uniq_ratio = len(set(ws)) / max(1, len(ws))
+        return uniq_ratio < 0.25
+
+    # ----------------------------------------------------
+    # 0) CDR EARLY (so we can force language if needed)
+    # ----------------------------------------------------
+    cdr = fetch_voiso(uuid) if uuid else {}
+
+    # Force Greek if phone prefix indicates Greece (+30)
+    force_lang = None
+    try:
+        to_num = str(cdr.get("to") or "").lstrip("+")
+        frm_num = str(cdr.get("from") or "").lstrip("+")
+        if to_num.startswith("30") or frm_num.startswith("30"):
+            force_lang = "el"
+    except:
+        force_lang = None
+
     try:
         # ----------------------------------------------------
-        # 1) TRANSCRIBE  (WITH QUALITY RETRY + GREEK BOOST)
+        # 1) TRANSCRIBE (WITH QUALITY RETRY + GREEK BOOST)
         # ----------------------------------------------------
-        segments, info = whisper_model.transcribe(str(file_path), vad_filter=True, beam_size=5)
+        segments, info = whisper_model.transcribe(
+            str(file_path),
+            vad_filter=True,
+            beam_size=5,
+            language=force_lang
+        )
         raw = [s for s in segments if (s.text or "").strip()]
         txt = " ".join([s.text.strip() for s in raw])
 
-        # ---- helpers ----
-        def looks_hallucinated(t: str) -> bool:
-            ws = (t or "").lower().split()
-            if len(ws) < 8:
-                return True
-            uniq_ratio = len(set(ws)) / max(1, len(ws))
-            return uniq_ratio < 0.25
+        lang_guess = (getattr(info, "language", "") or "").lower().strip()
 
-        lang_guess = (info.language or "").lower().strip()
-
-        # Retry conditions:
         need_retry = (
             len(txt.split()) < 12
             or looks_hallucinated(txt)
+            or force_lang == "el"
             or lang_guess in ("el", "gr")
         )
 
         if need_retry:
             print("⚠ Quality retry transcription...")
-            # If greek, try medium (recommended)
-            # NOTE: you must define whisper_model_medium globally (see below)
-            if lang_guess in ("el", "gr"):
-                segments, info = whisper_model_medium.transcribe(str(file_path), vad_filter=True, beam_size=5)
+            if force_lang == "el" or lang_guess in ("el", "gr"):
+                segments, info = whisper_model_medium.transcribe(
+                    str(file_path),
+                    vad_filter=True,
+                    beam_size=5,
+                    language="el"
+                )
             else:
-                segments, info = whisper_model.transcribe(str(file_path), vad_filter=False, beam_size=5)
+                segments, info = whisper_model.transcribe(
+                    str(file_path),
+                    vad_filter=False,
+                    beam_size=5,
+                    language=force_lang
+                )
 
             raw = [s for s in segments if (s.text or "").strip()]
             txt = " ".join([s.text.strip() for s in raw])
@@ -745,7 +833,9 @@ def process_audio(file_path: Path, uuid=None):
             dialogue = []
             cur = "Agent"
             for i, seg in enumerate(raw):
-                dialogue.append({"speaker": cur, "text": seg.text.strip(), "start": seg.start, "end": seg.end})
+                dialogue.append(
+                    {"speaker": cur, "text": seg.text.strip(), "start": seg.start, "end": seg.end}
+                )
                 if i % 2 == 1:
                     cur = "Client" if cur == "Agent" else "Agent"
 
@@ -754,20 +844,21 @@ def process_audio(file_path: Path, uuid=None):
         dialogue_score = int(min(100, (spoken / total_duration) * 100)) if total_duration else 0
 
         # ----------------------------------------------------
-        # 3) CDR + LANGUAGE
+        # 3) LANGUAGE DETECTION (final)
         # ----------------------------------------------------
-        cdr = fetch_voiso(uuid) if uuid else {}
-
-        lang = (info.language or "").lower().strip()
+        lang = (getattr(info, "language", "") or "").lower().strip()
         if lang in ("", "unknown"):
             lang = detect_language_from_country(cdr.get("to") or cdr.get("from"))
 
-        if lang.startswith("sl"): lang = "sl"
-        if lang.startswith(("hr", "bs", "sr")): lang = "hr"
-        if lang.startswith("el"): lang = "gr"
+        if lang.startswith("sl"):
+            lang = "sl"
+        if lang.startswith(("hr", "bs", "sr")):
+            lang = "hr"
+        if lang.startswith("el"):
+            lang = "gr"
 
         # ----------------------------------------------------
-        # 4) TRANSLATION (EN + IT) + translate_score + retry
+        # 4) TRANSLATION (EN + IT) + translation_score + retry
         # ----------------------------------------------------
         en_lines, it_lines = [], []
         agent_en_texts, client_en_texts = [], []
@@ -776,7 +867,7 @@ def process_audio(file_path: Path, uuid=None):
             sp = turn["speaker"]
             orig = clean(turn["text"])
 
-            # cache translate -> EN
+            # translate -> EN (cached)
             if lang == "en":
                 en_t = orig
             else:
@@ -785,20 +876,26 @@ def process_audio(file_path: Path, uuid=None):
                     en_t = TRANS_CACHE[k]
                 else:
                     en_t = clean(translate_to_english(orig, lang))
+                    en_t = clean_repetition_heavy(en_t)
                     _cache_put(TRANS_CACHE, k, en_t)
 
-            # cache EN -> IT
+            en_t = clean_repetition_heavy(en_t)
+
+            # EN -> IT (cached)
             if en_t in IT_CACHE:
                 it_t = IT_CACHE[en_t]
             else:
                 it_t = clean(translate_en_to_it(en_t))
+                it_t = clean_repetition_heavy(it_t)
                 _cache_put(IT_CACHE, en_t, it_t)
 
             en_lines.append(f"- {sp}: {en_t}")
             it_lines.append(f"- {'Agente' if sp == 'Agent' else 'Cliente'}: {it_t}")
 
-            if sp == "Agent": agent_en_texts.append(en_t)
-            else: client_en_texts.append(en_t)
+            if sp == "Agent":
+                agent_en_texts.append(en_t)
+            else:
+                client_en_texts.append(en_t)
 
         combined_en = clean(" ".join(agent_en_texts + client_en_texts)).lower()
         total_words = len(combined_en.split())
@@ -808,7 +905,6 @@ def process_audio(file_path: Path, uuid=None):
         both_spoke = agent_spoke and client_spoke
 
         # translation_score (compare EN vs IT->EN back translation)
-        # use full transcript text (EN)
         full_en_for_score = clean(" ".join(agent_en_texts + client_en_texts))
         full_it_for_score = clean("\n".join([l.split(": ", 1)[1] for l in it_lines if ": " in l]))
 
@@ -816,78 +912,151 @@ def process_audio(file_path: Path, uuid=None):
         if full_en_for_score and full_it_for_score:
             translate_score = translation_score_en_it(full_en_for_score, full_it_for_score)
 
-        # if translation is suspiciously low, redo IT once (same pipeline)
-        # (kept simple to avoid loops)
+        # retry IT once if suspiciously low
         if translate_score and translate_score < 0.45:
-            it_lines = []
+            it_lines_retry = []
             for line in en_lines:
-                # rebuild IT from EN line again
                 if ": " in line:
                     en_t = clean(line.split(": ", 1)[1])
-                    it_t = clean(translate_en_to_it(en_t))
-                    it_lines.append(f"- {'Agente' if 'Agent:' in line else 'Cliente'}: {it_t}")
-            # recompute score
-            full_it_for_score = clean("\n".join([l.split(": ", 1)[1] for l in it_lines if ": " in l]))
-            translate_score = translation_score_en_it(full_en_for_score, full_it_for_score)
+                    it_t = clean_repetition_heavy(clean(translate_en_to_it(en_t)))
+                    it_lines_retry.append(
+                        f"- {'Agente' if 'Agent:' in line else 'Cliente'}: {it_t}"
+                    )
+            full_it_for_score_retry = clean(
+                "\n".join([l.split(": ", 1)[1] for l in it_lines_retry if ": " in l])
+            )
+            translate_score = translation_score_en_it(full_en_for_score, full_it_for_score_retry)
+            it_lines = it_lines_retry
 
         # ----------------------------------------------------
-        # 5) KPI SCORING (keep your AI KPI scoring)
-        # ----------------------------------------------------
-        score_val, missing, comment = score_text(combined_en)
-
-        # reduce score=0 except blank/noise calls
-        # if not blank_call and score is 0, give minimum 10 (prevents “0 on real calls”)
-        if (not blank_call) and score_val == 0 and total_words >= 12:
-            score_val = 10
-
-        # ----------------------------------------------------
-        # 6) call_score (Milestone 3)
+        # 5) call_score
         # ----------------------------------------------------
         call_score = compute_call_score(total_words, dialogue_score, both_spoke, blank_call)
 
         # ----------------------------------------------------
-        # 7) ORDER STATUS (CLIENT-INTENT FIRST)
+        # 6) KPI SCORING (keywords + baseline from call quality)
+        # ----------------------------------------------------
+        score_val, missing, comment = score_text(combined_en)
+
+        baseline = 0
+        if not blank_call:
+            baseline = min(40, int(call_score * 0.4))  # 0..40
+
+        score_val = max(score_val, baseline)
+        if blank_call:
+            score_val = 0
+
+        # ----------------------------------------------------
+        # 7) ORDER STATUS (ALWAYS REMOTE MISTRAL; FALLBACK ON FAIL)
         # ----------------------------------------------------
         disp = (cdr.get("disposition") or "").lower()
-        bad_disp = ["abandon", "abandoned", "failed", "busy", "no answer", "dialer_abandoned", "system_abandoned"]
+        bad_disp = {
+            "abandon", "abandoned", "failed", "busy", "no answer",
+            "dialer_abandoned", "system_abandoned"
+        }
 
         client_en_only = clean(" ".join(client_en_texts)).lower()
-        agent_en_only  = clean(" ".join(agent_en_texts)).lower()
+        agent_en_only = clean(" ".join(agent_en_texts)).lower()
+        client_words = len(client_en_only.split())
 
-        # hard rules
-        if blank_call or not client_spoke or dialogue_score < 10:
-            order_status = "recall"
-        elif any(x in disp for x in bad_disp):
-            order_status = "recall"
+        # duration_sec from cdr (robust)
+        duration_sec = 0
+        try:
+            if isinstance(cdr.get("duration"), dict):
+                duration_sec = int(
+                    cdr["duration"].get("talk_time", cdr["duration"].get("total", 0)) or 0
+                )
+            else:
+                duration_sec = int(cdr.get("duration") or 0)
+        except:
+            duration_sec = 0
+
+        # ---- 7.1 Remote decision (always try) ----
+        llm_meta = {
+            "enabled": bool(ENABLE_REMOTE_LLM),
+            "method": "mistral",      # will flip to fallback on fail
+            "ok": False,
+            "confidence": 0.0,
+            "reason": "",
+        }
+
+        order_status = "recall"  # safe default
+
+        llm_res = call_mistral_remote(
+            {
+                "task": "order_status",
+                "client_text": client_en_only,
+                "agent_text": agent_en_only,
+                "meta": {
+                    "duration_sec": duration_sec,
+                    "dialogue_score": dialogue_score,
+                    "blank_call": blank_call,
+                    "client_words": client_words,
+                    "call_status": cdr.get("disposition", "Unknown"),
+                    "language": lang,
+                },
+            },
+            timeout=10
+        )
+
+        if llm_res and llm_res.get("ok") and llm_res.get("order_status") in ("accepted", "refused", "recall"):
+            order_status = llm_res["order_status"]
+            llm_meta["ok"] = True
+            try:
+                llm_meta["confidence"] = float(llm_res.get("confidence", 0.0) or 0.0)
+            except:
+                llm_meta["confidence"] = 0.0
+            llm_meta["confidence"] = max(0.0, min(1.0, llm_meta["confidence"]))
+            llm_meta["reason"] = str(llm_res.get("reason", "") or "")[:300]
         else:
-            accept_patterns = [
-                "i confirm", "i accept", "yes i confirm", "yes", "ok", "okay",
-                "send it", "proceed", "i will receive", "i will take it",
-                "i confirm the order", "i confirm address", "i agree"
-            ]
-            refuse_patterns = [
-                "i don't want", "not interested", "cancel", "stop", "refuse",
-                "i will not take it", "no i don't want"
-            ]
-            recall_patterns = [
-                "call later", "later", "not now", "call back", "tomorrow"
-            ]
+            # ---- 7.2 Fallback decision (strict local rules) ----
+            llm_meta["method"] = "fallback"
+            llm_meta["ok"] = False
+            llm_meta["reason"] = "Remote mistral failed or returned invalid output"
 
-            # priority: CUSTOMER intent
-            if match_any_sem(client_en_only, accept_patterns, th=0.23) or text_has_any(client_en_only, ["i confirm", "i accept", "i agree", "send it"]):
-                order_status = "accepted"
-            elif match_any_sem(client_en_only, refuse_patterns, th=0.23) or text_has_any(client_en_only, ["not interested", "cancel", "refuse"]):
-                order_status = "refused"
-            elif match_any_sem(client_en_only, recall_patterns, th=0.23) or text_has_any(client_en_only, ["call later", "not now", "tomorrow"]):
+            if blank_call or (not client_spoke) or dialogue_score < 10 or any(x in disp for x in bad_disp):
+                order_status = "recall"
+            elif client_words < 6:
                 order_status = "recall"
             else:
-                # if client didn't express intent, use call quality
-                # long+both spoke → assume recall rather than wrong accept/refuse
+                if text_has_any(client_en_only, ["i confirm", "confirm the order", "confirm address", "yes that's correct", "send it", "proceed"]):
+                    order_status = "accepted"
+                elif text_has_any(client_en_only, ["not interested", "cancel", "i didn't order", "wrong number", "remove my number", "do not call", "refuse"]):
+                    order_status = "refused"
+                elif text_has_any(client_en_only, ["call later", "not now", "tomorrow", "call back", "later please"]):
+                    order_status = "recall"
+                else:
+                    accept_patterns = [
+                        "i confirm", "yes i confirm", "i confirm the order", "i confirm the address",
+                        "yes that's correct", "yes correct", "ok confirm", "i agree", "send it",
+                        "yes send", "yes proceed", "i will take it", "i will receive it"
+                    ]
+                    refuse_patterns = [
+                        "not interested", "i don't want", "cancel", "i refuse", "stop the order",
+                        "i didn't order", "wrong number", "do not call", "remove my number"
+                    ]
+                    recall_patterns = [
+                        "call later", "call me later", "not now", "tomorrow", "call back",
+                        "later please", "i can't talk now"
+                    ]
+
+                    if match_any_sem(client_en_only, accept_patterns, th=0.24):
+                        order_status = "accepted"
+                    elif match_any_sem(client_en_only, refuse_patterns, th=0.24):
+                        order_status = "refused"
+                    elif match_any_sem(client_en_only, recall_patterns, th=0.24):
+                        order_status = "recall"
+                    else:
+                        order_status = "recall"
+
+            # safety gate for short calls
+            if order_status == "accepted" and (duration_sec > 0 and duration_sec < 25) and not text_has_any(
+                client_en_only, ["confirm", "yes that's correct", "send it"]
+            ):
                 order_status = "recall"
 
-
         # ----------------------------------------------------
-        # 8) REJECTION REASONS (Milestone 2 feature, keep simple)
+        # 8) REJECTION REASONS (simple)
         # ----------------------------------------------------
         rejection_reason = "-"
         if order_status == "refused":
@@ -905,12 +1074,12 @@ def process_audio(file_path: Path, uuid=None):
             rejection_reason = best_label
 
         # ----------------------------------------------------
-        # 9) PRODUCT DETECTION (Milestone 3)
+        # 9) PRODUCT DETECTION
         # ----------------------------------------------------
         product_info = detect_product_ai(combined_en)
 
         # ----------------------------------------------------
-        # 10) SAVE JSON
+        # 10) SAVE JSON (includes llm debug)
         # ----------------------------------------------------
         res = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -931,6 +1100,11 @@ def process_audio(file_path: Path, uuid=None):
 
             "product": product_info,
 
+            # Debug: show which method was used
+            "llm": {
+                "order_status": llm_meta
+            },
+
             "translation": {
                 "english": "\n".join(en_lines) if en_lines else "-",
                 "italian": "\n".join(it_lines) if it_lines else "-",
@@ -947,13 +1121,12 @@ def process_audio(file_path: Path, uuid=None):
         tmp.write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.rename(file_path.with_suffix(".json"))
 
-        print(f"✅ Saved {file_path.stem}.json")
+        print(f"✅ Saved {file_path.stem}.json | order_status={order_status} | method={llm_meta.get('method')}")
         return res
 
     except Exception as e:
         print("❌ process_audio error:", e)
         return {}
-
 
 
 
