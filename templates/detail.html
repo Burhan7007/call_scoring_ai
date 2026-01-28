@@ -23,7 +23,31 @@
     {% endif %}
     &nbsp;|&nbsp;
     <b>Rejection:</b> {{ d.rejection_reason or "-" }}
+
+    {# -----------------------------
+       Decision Engine (AI vs Fallback)
+       ----------------------------- #}
+    {% set os_llm = d.get('llm', {}).get('order_status', {}) %}
+    {% if os_llm %}
+      &nbsp;|&nbsp;
+      <b>Decision Engine:</b>
+      {% if os_llm.get('method') == 'mistral' and os_llm.get('ok') %}
+        <span style="padding:3px 8px;border-radius:999px;background:#0f766e;color:#99f6e4;font-size:12px;">AI Engine (Active)</span>
+      {% else %}
+        <span style="padding:3px 8px;border-radius:999px;background:#334155;color:#e2e8f0;font-size:12px;">Safety Fallback</span>
+      {% endif %}
+
+      {% if os_llm.get('confidence') is not none %}
+        &nbsp;<span style="color:#94a3b8;font-size:12px;">(Conf: {{ os_llm.get('confidence') }})</span>
+      {% endif %}
+    {% endif %}
   </div>
+
+  {% if os_llm and os_llm.get('reason') %}
+    <div style="margin-bottom:14px;background:#0b1220;border:1px solid #1e293b;border-radius:10px;padding:10px 12px;color:#cbd5e1;">
+      <b style="color:#94a3b8;">Decision Note:</b> {{ os_llm.get('reason') }}
+    </div>
+  {% endif %}
 
   <div style="background:#0b1220;border:1px solid #1e293b;border-radius:10px;padding:12px 14px;margin-bottom:18px;">
     <div style="color:#94a3b8;font-size:12px;">KPI Score</div>
@@ -95,7 +119,3 @@
 </div>
 
 {% endblock %}
-<<<<<<< HEAD:templates/detail.html
-=======
-
->>>>>>> 19d7a9c (Fix: avoid gunicorn port conflict + improve detail formatting):backend/templates/detail.html
