@@ -711,16 +711,28 @@ def call_mistral_remote(payload: dict, timeout=10):
         print("⚠️ remote mistral failed:", e)
         return None
 
-
+def chunk_lines(lines, max_chars=900):
+    chunks, buf, sz = [], [], 0
+    for ln in lines:
+        ln = (ln or "").strip()
+        if not ln:
+            continue
+        if sz + len(ln) + 1 > max_chars and buf:
+            chunks.append("\n".join(buf))
+            buf, sz = [], 0
+        buf.append(ln)
+        sz += len(ln) + 1
+    if buf:
+        chunks.append("\n".join(buf))
+    return chunks
 
 def process_audio(file_path: Path, uuid=None):
     """
-    Full updated process_audio:
-    - Local pipeline stays same (download -> whisper -> diarize -> translate -> score -> save JSON)
-    - ORDER STATUS is ALWAYS decided by remote Mistral (Colab) if available
-    - If remote fails, fallback strict local rules are used
-    - Saves debug info inside JSON so detail page can show which method was used
-      -> res["llm"]["order_status"]["method"] = "mistral" | "fallback"
+    Updated process_audio (with translation chunk re-try):
+    - Same pipeline
+    - Translation quality: computes translation_score; if low -> retranslate Italian using context chunks
+    - Order status: always tries remote; fallback on failure
+    - Saves llm debug in JSON
     """
     print(f"🎧 Transcribing {file_path.name}")
 
@@ -858,7 +870,7 @@ def process_audio(file_path: Path, uuid=None):
             lang = "gr"
 
         # ----------------------------------------------------
-        # 4) TRANSLATION (EN + IT) + translation_score + retry
+        # 4) TRANSLATION (EN + IT) + translation_score + improved retry
         # ----------------------------------------------------
         en_lines, it_lines = [], []
         agent_en_texts, client_en_texts = [], []
@@ -912,21 +924,39 @@ def process_audio(file_path: Path, uuid=None):
         if full_en_for_score and full_it_for_score:
             translate_score = translation_score_en_it(full_en_for_score, full_it_for_score)
 
-        # retry IT once if suspiciously low
-        if translate_score and translate_score < 0.45:
-            it_lines_retry = []
+        # -------- improved retry: context chunk translation to Italian --------
+        # (requires chunk_lines() already added above this function)
+        if translate_score and translate_score < 0.55:
+            print("⚠ Low translation_score -> re-translating Italian with context chunks...")
+
+            # Build plain EN text lines (without "- Agent:" prefix)
+            plain_en_lines = []
             for line in en_lines:
                 if ": " in line:
-                    en_t = clean(line.split(": ", 1)[1])
-                    it_t = clean_repetition_heavy(clean(translate_en_to_it(en_t)))
-                    it_lines_retry.append(
-                        f"- {'Agente' if 'Agent:' in line else 'Cliente'}: {it_t}"
-                    )
-            full_it_for_score_retry = clean(
-                "\n".join([l.split(": ", 1)[1] for l in it_lines_retry if ": " in l])
-            )
-            translate_score = translation_score_en_it(full_en_for_score, full_it_for_score_retry)
+                    plain_en_lines.append(line.split(": ", 1)[1].strip())
+                else:
+                    plain_en_lines.append(line.strip())
+
+            chunks = chunk_lines(plain_en_lines, max_chars=900)
+
+            new_it_texts = []
+            for ch in chunks:
+                it_block = clean(translate_en_to_it(ch))
+                it_block = clean_repetition_heavy(it_block)
+                new_it_texts.extend([x.strip() for x in it_block.split("\n") if x.strip()])
+
+            it_lines_retry = []
+            idx = 0
+            for line in en_lines:
+                sp_it = "Agente" if "Agent:" in line else "Cliente"
+                msg_it = new_it_texts[idx] if idx < len(new_it_texts) else ""
+                idx += 1
+                it_lines_retry.append(f"- {sp_it}: {msg_it}")
+
             it_lines = it_lines_retry
+
+            full_it_for_score = clean("\n".join([l.split(": ", 1)[1] for l in it_lines if ": " in l]))
+            translate_score = translation_score_en_it(full_en_for_score, full_it_for_score)
 
         # ----------------------------------------------------
         # 5) call_score
@@ -947,7 +977,7 @@ def process_audio(file_path: Path, uuid=None):
             score_val = 0
 
         # ----------------------------------------------------
-        # 7) ORDER STATUS (ALWAYS REMOTE MISTRAL; FALLBACK ON FAIL)
+        # 7) ORDER STATUS (ALWAYS REMOTE; FALLBACK ON FAIL)
         # ----------------------------------------------------
         disp = (cdr.get("disposition") or "").lower()
         bad_disp = {
@@ -971,10 +1001,9 @@ def process_audio(file_path: Path, uuid=None):
         except:
             duration_sec = 0
 
-        # ---- 7.1 Remote decision (always try) ----
         llm_meta = {
             "enabled": bool(ENABLE_REMOTE_LLM),
-            "method": "mistral",      # will flip to fallback on fail
+            "method": "mistral",
             "ok": False,
             "confidence": 0.0,
             "reason": "",
@@ -1009,7 +1038,6 @@ def process_audio(file_path: Path, uuid=None):
             llm_meta["confidence"] = max(0.0, min(1.0, llm_meta["confidence"]))
             llm_meta["reason"] = str(llm_res.get("reason", "") or "")[:300]
         else:
-            # ---- 7.2 Fallback decision (strict local rules) ----
             llm_meta["method"] = "fallback"
             llm_meta["ok"] = False
             llm_meta["reason"] = "Remote mistral failed or returned invalid output"
@@ -1056,7 +1084,7 @@ def process_audio(file_path: Path, uuid=None):
                 order_status = "recall"
 
         # ----------------------------------------------------
-        # 8) REJECTION REASONS (simple)
+        # 8) REJECTION REASONS
         # ----------------------------------------------------
         rejection_reason = "-"
         if order_status == "refused":
@@ -1079,7 +1107,7 @@ def process_audio(file_path: Path, uuid=None):
         product_info = detect_product_ai(combined_en)
 
         # ----------------------------------------------------
-        # 10) SAVE JSON (includes llm debug)
+        # 10) SAVE JSON
         # ----------------------------------------------------
         res = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -1100,7 +1128,6 @@ def process_audio(file_path: Path, uuid=None):
 
             "product": product_info,
 
-            # Debug: show which method was used
             "llm": {
                 "order_status": llm_meta
             },
