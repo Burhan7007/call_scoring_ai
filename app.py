@@ -68,9 +68,12 @@ CREDS_FILE = ROOT / "admin_creds.json"
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-MISTRAL_REMOTE_URL = os.environ.get("https://martin-petite-shot-festivals.trycloudflare.com", "").strip()  # e.g. https://xxxx.ngrok-free.app
+MISTRAL_REMOTE_URL = os.environ.get("https://martin-petite-shot-festivals.trycloudflare.com", "").strip()
 MISTRAL_SECRET = os.environ.get("CHANGE_ME_TO_A_LONG_RANDOM_SECRET", "").strip()
+
 ENABLE_REMOTE_LLM = bool(MISTRAL_REMOTE_URL and MISTRAL_SECRET)
+
+
 
 # ==============================
 # EMBEDDING MODEL PATH
@@ -694,17 +697,15 @@ def text_has_any(t: str, phrases: list[str]) -> bool:
 def match_any_sem(text: str, patterns: list[str], th: float = 0.25) -> bool:
     return any(cosine_sim(text, p) >= th for p in patterns)
 
-def call_mistral_remote(payload: dict, timeout=10):
+def call_mistral_remote(payload: dict, timeout=15):
     if not ENABLE_REMOTE_LLM:
+        print("⚠️ Remote LLM disabled: missing env vars")
         return None
     try:
-        r = requests.post(
-            f"{MISTRAL_REMOTE_URL}/infer",
-            json=payload,
-            headers={"X-Auth": MISTRAL_SECRET},
-            timeout=timeout
-        )
+        url = f"{MISTRAL_REMOTE_URL.rstrip('/')}/infer"
+        r = requests.post(url, json=payload, headers={"X-Auth": MISTRAL_SECRET}, timeout=timeout)
         if r.status_code != 200:
+            print("⚠️ Remote LLM HTTP", r.status_code, r.text[:200])
             return None
         return r.json()
     except Exception as e:
