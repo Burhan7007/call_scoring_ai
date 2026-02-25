@@ -78,14 +78,15 @@ ENABLE_REMOTE_LLM = bool(MISTRAL_REMOTE_URL and MISTRAL_SECRET)
 # ==============================
 # EMBEDDING MODEL PATH
 # ==============================
-EMBED_MODEL_PATH = MODELS_DIR / "hf" / "distiluse-base-multilingual-cased-v2"
+EMBED_MODEL_NAME = "sentence-transformers/distiluse-base-multilingual-cased-v2"
 
 # ==============================
 # LOAD MULTILINGUAL EMBEDDING MODEL
 # ==============================
 from sentence_transformers import SentenceTransformer, util
 print("🔤 Loading embedding model for AI scoring + product detection...")
-embedder = SentenceTransformer(str(EMBED_MODEL_PATH))
+EMBED_MODEL_NAME = "sentence-transformers/distiluse-base-multilingual-cased-v2"
+
 
 # ==============================
 # EMBEDDING + SIMILARITY HELPERS (CACHED)
@@ -1474,5 +1475,5 @@ def voiso_webhook():
         return jsonify({"status": "ok"}), 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=8888, debug=False)
 
