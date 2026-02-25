@@ -68,10 +68,10 @@ CREDS_FILE = ROOT / "admin_creds.json"
 RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
-MISTRAL_REMOTE_URL = os.environ.get("https://martin-petite-shot-festivals.trycloudflare.com", "").strip()
-MISTRAL_SECRET = os.environ.get("CHANGE_ME_TO_A_LONG_RANDOM_SECRET", "").strip()
+MISTRAL_REMOTE_URL = os.environ.get("MISTRAL_REMOTE_URL", "").strip()
+MISTRAL_SECRET = os.environ.get("MISTRAL_SECRET", "").strip()
+ENABLE_REMOTE_LLM = bool(MISTRAL_REMOTE_URL)
 
-ENABLE_REMOTE_LLM = bool(MISTRAL_REMOTE_URL and MISTRAL_SECRET)
 
 
 
@@ -86,6 +86,7 @@ EMBED_MODEL_NAME = "sentence-transformers/distiluse-base-multilingual-cased-v2"
 from sentence_transformers import SentenceTransformer, util
 print("🔤 Loading embedding model for AI scoring + product detection...")
 EMBED_MODEL_NAME = "sentence-transformers/distiluse-base-multilingual-cased-v2"
+embedder = SentenceTransformer(EMBED_MODEL_NAME)
 
 
 # ==============================
@@ -698,19 +699,46 @@ def text_has_any(t: str, phrases: list[str]) -> bool:
 def match_any_sem(text: str, patterns: list[str], th: float = 0.25) -> bool:
     return any(cosine_sim(text, p) >= th for p in patterns)
 
-def call_mistral_remote(payload: dict, timeout=15):
-    if not ENABLE_REMOTE_LLM:
-        print("⚠️ Remote LLM disabled: missing env vars")
+def call_mistral_remote(payload: dict, timeout=20):
+    try:
+        r = requests.post(
+            "http://127.0.0.1:11434/api/chat",
+            json={
+                "model": "mistral",
+                "messages": [
+                    {"role":"system","content":"Return ONLY JSON with keys: order_status, confidence, reason. order_status: accepted/refused/recall."},
+                    {"role":"user","content": json.dumps(payload, ensure_ascii=False)}
+                ],
+                "stream": False
+            },
+            timeout=timeout
+        )
+        if r.status_code != 200:
+            print("⚠️ Ollama HTTP", r.status_code, r.text[:200])
+            return None
+        data = r.json()
+        txt = (data.get("message") or {}).get("content","")
+        # parse JSON from txt (same _extract_json logic)
+        out = _extract_json(txt)
+        if not out: 
+            return {"ok": False, "raw": txt}
+        out["ok"] = True
+        return out
+    except Exception as e:
+        print("⚠️ Ollama mistral failed:", e)
+        return None
+
+import re
+
+def _extract_json(text: str):
+    if not text:
+        return None
+    m = re.search(r"\{.*\}", text, flags=re.S)
+    if not m:
         return None
     try:
-        url = f"{MISTRAL_REMOTE_URL.rstrip('/')}/infer"
-        r = requests.post(url, json=payload, headers={"X-Auth": MISTRAL_SECRET}, timeout=timeout)
-        if r.status_code != 200:
-            print("⚠️ Remote LLM HTTP", r.status_code, r.text[:200])
-            return None
-        return r.json()
-    except Exception as e:
-        print("⚠️ remote mistral failed:", e)
+        return json.loads(m.group(0))
+    except:
         return None
 
 def chunk_lines(lines, max_chars=900):
@@ -1305,13 +1333,22 @@ def home():
         items.append(r)
 
     items = sorted(items, key=lambda x: x.get("timestamp", ""), reverse=True)
-    return render_template(
-        "index.html",
-        items=items,
-        agents=agents,
-        langs=langs,
-        statuses=statuses,
-    )
+        return render_template(
+            "index.html",
+            items=items,
+            agents=agents,
+            langs=langs,
+            statuses=statuses,
+        
+            # keep filters selected in UI
+            q=q,
+            phone_q=phone_q,
+            agent_q=agent_q,
+            lang_q=lang_q,
+            status_q=status_q,
+            order_status_q=order_status_q,
+            rejection_q=rejection_q,
+        )
 
 
 
