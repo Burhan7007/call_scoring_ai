@@ -1333,22 +1333,22 @@ def home():
         items.append(r)
 
     items = sorted(items, key=lambda x: x.get("timestamp", ""), reverse=True)
-        return render_template(
-            "index.html",
-            items=items,
-            agents=agents,
-            langs=langs,
-            statuses=statuses,
-        
-            # keep filters selected in UI
-            q=q,
-            phone_q=phone_q,
-            agent_q=agent_q,
-            lang_q=lang_q,
-            status_q=status_q,
-            order_status_q=order_status_q,
-            rejection_q=rejection_q,
-        )
+    return render_template(
+        "index.html",
+        items=items,
+        agents=agents,
+        langs=langs,
+        statuses=statuses,
+    
+        # keep filters selected in UI
+        q=q,
+        phone_q=phone_q,
+        agent_q=agent_q,
+        lang_q=lang_q,
+        status_q=status_q,
+        order_status_q=order_status_q,
+        rejection_q=rejection_q,
+    )
 
 
 
